@@ -1,17 +1,11 @@
 from dataclasses import dataclass
 import os
 from pathlib import Path
-from dotenv import load_dotenv
 from google import genai
-from google.genai import types
+from google.genai import errors, types
 
+from app.config import BACKEND_DIR
 from app.rag.retriever import RetrievedChunk
-
-# Load .env file from workspace root or backend if present
-load_dotenv()
-backend_env = Path(__file__).resolve().parent.parent.parent / ".env"
-if backend_env.exists():
-    load_dotenv(dotenv_path=backend_env)
 
 GEMINI_MODEL: str = "gemini-3.8-flash"
 THINKING_LEVEL: str = "low"
@@ -37,6 +31,10 @@ SYSTEM_INSTRUCTION: str = (
 _client: genai.Client | None = None
 
 
+class GenerationUnavailableError(Exception):
+    """Raised when Gemini generation fails after exhausting retries."""
+
+
 @dataclass
 class SourceCitation:
     """Represents a unique source document and page citation."""
@@ -53,7 +51,7 @@ class GeneratedAnswer:
 
 
 def get_gemini_client() -> genai.Client:
-    """Return the lazy singleton Gemini client instance.
+    """Return the lazy singleton Gemini client instance configured with native retry options.
 
     Raises:
         ValueError: If GEMINI_API_KEY environment variable is missing or empty.
@@ -63,7 +61,18 @@ def get_gemini_client() -> genai.Client:
         api_key = os.environ.get("GEMINI_API_KEY")
         if not api_key or not api_key.strip():
             raise ValueError("GEMINI_API_KEY environment variable is not set")
-        _client = genai.Client(api_key=api_key.strip())
+
+        retry_options = types.HttpRetryOptions(
+            attempts=3,
+            initial_delay=1.0,
+            max_delay=8.0,
+            exp_base=2.0,
+        )
+        http_options = types.HttpOptions(retry_options=retry_options)
+        _client = genai.Client(
+            api_key=api_key.strip(),
+            http_options=http_options,
+        )
     return _client
 
 
@@ -138,16 +147,21 @@ def generate_answer(
     )
 
     client = get_gemini_client()
-    response = client.models.generate_content(
-        model=GEMINI_MODEL,
-        contents=contents,
-        config=types.GenerateContentConfig(
-            system_instruction=SYSTEM_INSTRUCTION,
-            thinking_config=types.ThinkingConfig(
-                thinking_level=THINKING_LEVEL,
+    try:
+        response = client.models.generate_content(
+            model=GEMINI_MODEL,
+            contents=contents,
+            config=types.GenerateContentConfig(
+                system_instruction=SYSTEM_INSTRUCTION,
+                thinking_config=types.ThinkingConfig(
+                    thinking_level=THINKING_LEVEL,
+                ),
             ),
-        ),
-    )
+        )
+    except errors.ServerError as exc:
+        raise GenerationUnavailableError(
+            "The AI model is temporarily unavailable. Please try again shortly."
+        ) from exc
 
     answer_text = response.text
     if not answer_text or not answer_text.strip():

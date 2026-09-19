@@ -13,7 +13,7 @@ from fastapi.testclient import TestClient
 
 from app.api.chat import ChatResponse
 from app.main import app
-from app.rag.generator import GeneratedAnswer, SourceCitation
+from app.rag.generator import GeneratedAnswer, GenerationUnavailableError, SourceCitation
 from app.rag.loader import PageDocument
 
 
@@ -45,14 +45,17 @@ class TestAPI(unittest.TestCase):
 
     @patch("app.api.chat.generate_answer")
     @patch("app.api.chat.retrieve")
+    @patch("app.api.chat.load_bm25_index")
     @patch("app.api.chat.load_vector_store")
-    def test_chat_success(self, mock_load, mock_retrieve, mock_generate):
+    def test_chat_success(self, mock_load, mock_bm25, mock_retrieve, mock_generate):
         """Valid query returns HTTP 200 with answer, sources, and context flag."""
         # Create dummy index files so the endpoint sees an existing vector store
         (self.vectorstore_dir / "index.faiss").touch()
         (self.vectorstore_dir / "index.pkl").touch()
+        (self.vectorstore_dir / "bm25.pkl").touch()
 
         mock_load.return_value = MagicMock()
+        mock_bm25.return_value = MagicMock()
         mock_retrieve.return_value = [MagicMock()]
         mock_generate.return_value = GeneratedAnswer(
             answer="Overfitting occurs when a model learns noise.",
@@ -69,6 +72,34 @@ class TestAPI(unittest.TestCase):
             self.assertEqual(len(data["sources"]), 1)
             self.assertEqual(data["sources"][0]["source_filename"], "ml.pdf")
             self.assertEqual(data["sources"][0]["page_number"], 3)
+
+    @patch("app.api.chat.generate_answer")
+    @patch("app.api.chat.retrieve")
+    @patch("app.api.chat.load_bm25_index")
+    @patch("app.api.chat.load_vector_store")
+    def test_chat_returns_503_on_generation_unavailable_error(
+        self, mock_load, mock_bm25, mock_retrieve, mock_generate
+    ):
+        """When Gemini generation raises GenerationUnavailableError, API returns HTTP 503 with detail."""
+        (self.vectorstore_dir / "index.faiss").touch()
+        (self.vectorstore_dir / "index.pkl").touch()
+        (self.vectorstore_dir / "bm25.pkl").touch()
+
+        mock_load.return_value = MagicMock()
+        mock_bm25.return_value = MagicMock()
+        mock_retrieve.return_value = [MagicMock()]
+        mock_generate.side_effect = GenerationUnavailableError(
+            "The AI model is temporarily unavailable. Please try again shortly."
+        )
+
+        with patch("app.api.chat.VECTORSTORE_DIR", self.vectorstore_dir):
+            response = self.client.post("/api/chat", json={"query": "Explain the framework"})
+            self.assertEqual(response.status_code, 503)
+            data = response.json()
+            self.assertEqual(
+                data["detail"],
+                "The AI model is temporarily unavailable. Please try again shortly.",
+            )
 
     def test_chat_rejects_empty_query(self):
         """POST /api/chat with empty or whitespace-only query must return 400 or 422."""
@@ -177,13 +208,16 @@ class TestAPI(unittest.TestCase):
 
     @patch("app.api.chat.generate_answer")
     @patch("app.api.chat.retrieve")
+    @patch("app.api.chat.load_bm25_index")
     @patch("app.api.chat.load_vector_store")
-    def test_chat_response_shape(self, mock_load, mock_retrieve, mock_generate):
+    def test_chat_response_shape(self, mock_load, mock_bm25, mock_retrieve, mock_generate):
         """Chat API response must only contain answer, sources, and has_sufficient_context."""
         (self.vectorstore_dir / "index.faiss").touch()
         (self.vectorstore_dir / "index.pkl").touch()
+        (self.vectorstore_dir / "bm25.pkl").touch()
 
         mock_load.return_value = MagicMock()
+        mock_bm25.return_value = MagicMock()
         mock_retrieve.return_value = []
         mock_generate.return_value = GeneratedAnswer(
             answer="Fallback answer.",

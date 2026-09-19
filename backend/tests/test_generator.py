@@ -7,10 +7,13 @@ from unittest.mock import MagicMock, patch
 # Ensure backend package is in python path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+from google.genai import errors
+
 from app.rag.generator import (
     FALLBACK_ANSWER,
     GEMINI_MODEL,
     GeneratedAnswer,
+    GenerationUnavailableError,
     SourceCitation,
     _format_context,
     _reset_gemini_client,
@@ -235,6 +238,61 @@ class TestGenerator(unittest.TestCase):
         with self.assertRaises(RuntimeError) as ctx:
             generate_answer("Query", [chunk])
         self.assertIn("empty", str(ctx.exception).lower())
+
+    def test_generation_unavailable_error_exists(self):
+        """GenerationUnavailableError must exist and be an Exception subclass."""
+        self.assertTrue(issubclass(GenerationUnavailableError, Exception))
+        err = GenerationUnavailableError("Service temporary unavailable")
+        self.assertEqual(str(err), "Service temporary unavailable")
+
+    @patch("app.rag.generator.get_gemini_client")
+    def test_server_error_translated_to_generation_unavailable_error(self, mock_get_client):
+        """Terminal Gemini ServerError (e.g. 503) must be translated to GenerationUnavailableError."""
+        mock_client = MagicMock()
+        mock_client.models.generate_content.side_effect = errors.ServerError(
+            503, {"error": {"message": "Model is experiencing high demand"}}
+        )
+        mock_get_client.return_value = mock_client
+
+        chunk = _make_retrieved_chunk(text="Document text")
+        with self.assertRaises(GenerationUnavailableError) as ctx:
+            generate_answer("What is the framework?", [chunk])
+
+        self.assertEqual(
+            str(ctx.exception),
+            "The AI model is temporarily unavailable. Please try again shortly.",
+        )
+
+    @patch("app.rag.generator.get_gemini_client")
+    def test_client_error_not_converted_to_generation_unavailable_error(self, mock_get_client):
+        """ClientError (e.g. 400 bad request) must propagate and not be converted to GenerationUnavailableError."""
+        mock_client = MagicMock()
+        mock_client.models.generate_content.side_effect = errors.ClientError(
+            400, {"error": {"message": "Invalid argument"}}
+        )
+        mock_get_client.return_value = mock_client
+
+        chunk = _make_retrieved_chunk(text="Document text")
+        with self.assertRaises(errors.ClientError):
+            generate_answer("Query", [chunk])
+
+    def test_client_configured_with_native_retry_options(self):
+        """get_gemini_client() configures Client with HttpRetryOptions(attempts=3, initial_delay=1.0, max_delay=8.0, exp_base=2.0)."""
+        with patch.dict(os.environ, {"GEMINI_API_KEY": "test-key"}), patch("google.genai.Client") as mock_client_cls:
+            _reset_gemini_client()
+            get_gemini_client()
+
+            mock_client_cls.assert_called_once()
+            call_kwargs = mock_client_cls.call_args.kwargs
+            self.assertEqual(call_kwargs["api_key"], "test-key")
+            self.assertIn("http_options", call_kwargs)
+            http_options = call_kwargs["http_options"]
+            self.assertIsNotNone(http_options.retry_options)
+            retry_opts = http_options.retry_options
+            self.assertEqual(retry_opts.attempts, 3)
+            self.assertEqual(retry_opts.initial_delay, 1.0)
+            self.assertEqual(retry_opts.max_delay, 8.0)
+            self.assertEqual(retry_opts.exp_base, 2.0)
 
 
 if __name__ == "__main__":

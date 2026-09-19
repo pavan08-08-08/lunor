@@ -4,6 +4,7 @@ from fastapi import APIRouter, File, HTTPException, UploadFile
 from pydantic import BaseModel
 
 from app.config import UPLOADS_DIR, VECTORSTORE_DIR, ensure_directories
+from app.rag.bm25_store import build_bm25_index, save_bm25_index
 from app.rag.chunker import ChunkDocument, chunk_pages
 from app.rag.embeddings import embed_chunks
 from app.rag.loader import PDFLoadError, load_pdf
@@ -48,6 +49,9 @@ def rebuild_vector_store() -> None:
     embedded_chunks = embed_chunks(all_chunks)
     store = build_vector_store(embedded_chunks)
     save_vector_store(store, str(VECTORSTORE_DIR))
+
+    bm25_index = build_bm25_index(all_chunks)
+    save_bm25_index(bm25_index, str(VECTORSTORE_DIR))
 
 
 @router.post("/upload", response_model=DocumentUploadResponse)
