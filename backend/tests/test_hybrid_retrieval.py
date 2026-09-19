@@ -160,6 +160,134 @@ class TestHybridRetrieval(unittest.TestCase):
         # Verify it references page 1 where Section B. Research Gap is located
         self.assertTrue(any(r.page_number == 1 for r in gap_chunks))
 
+    def test_bm25_relative_threshold_accepts_strong_and_rejects_distractor(self):
+        """Chunks with BM25 >= 50% of top BM25 pass, while distractors below 50% are rejected."""
+        # Chunk 1: target matching specific technical terms (high BM25)
+        # Chunk 2: distractor matching only one incidental common term (low BM25 < 50%)
+        # Chunk 3: background chunk ensuring corpus N >= 3 for positive BM25Okapi IDF
+        chunk_target = ChunkDocument(
+            chunk_id="c_target", doc_id="d1", source_filename="target.pdf", page_number=1, total_pages=1, chunk_index=0,
+            text="Project Atlas evaluation achieved retrieval recall benchmark 0.82 metric", char_count=73
+        )
+        chunk_distractor = ChunkDocument(
+            chunk_id="c_distractor", doc_id="d2", source_filename="distractor.pdf", page_number=1, total_pages=1, chunk_index=0,
+            text="Project Borealis telemetry equipment monitoring sensor pipeline", char_count=65
+        )
+        chunk_bg = ChunkDocument(
+            chunk_id="c_bg", doc_id="d3", source_filename="bg.pdf", page_number=1, total_pages=1, chunk_index=0,
+            text="General system documentation describing software environment", char_count=61
+        )
+
+        all_chunks = [chunk_target, chunk_distractor, chunk_bg]
+        embedded = embed_chunks(all_chunks)
+        store = build_vector_store(embedded)
+        bm25_idx = build_bm25_index(all_chunks)
+
+        # Query where both match 'project', but target matches 'recall', 'atlas', 'project'
+        query = "What was the recall achieved by Project Atlas?"
+        results = retrieve(
+            query=query,
+            store=store,
+            bm25_index=bm25_idx,
+            k=5,
+            threshold=0.99,  # Force lexical qualification only by setting high semantic threshold
+        )
+
+        cids = [r.chunk_id for r in results]
+        self.assertIn("c_target", cids, "Target chunk with strong BM25 score must qualify")
+        self.assertNotIn("c_distractor", cids, "Distractor with <50% top BM25 score must be rejected")
+
+    def test_exact_technical_term_passes_with_single_overlapping_token(self):
+        """Exact technical acronym match passes lexical gate even with only one content token match."""
+        chunk_rrf = ChunkDocument(
+            chunk_id="c_rrf", doc_id="d1", source_filename="atlas.pdf", page_number=1, total_pages=1, chunk_index=0,
+            text="Atlas uses Reciprocal Rank Fusion RRF ranking algorithm", char_count=56
+        )
+        chunk_other = ChunkDocument(
+            chunk_id="c_other", doc_id="d2", source_filename="paper.pdf", page_number=1, total_pages=1, chunk_index=0,
+            text="Urban transport safety predictions with gradient boosted trees", char_count=64
+        )
+        chunk_bg = ChunkDocument(
+            chunk_id="c_bg", doc_id="d3", source_filename="bg.pdf", page_number=1, total_pages=1, chunk_index=0,
+            text="General statistical data analysis and exploratory research methods", char_count=68
+        )
+
+        all_chunks = [chunk_rrf, chunk_other, chunk_bg]
+        embedded = embed_chunks(all_chunks)
+        store = build_vector_store(embedded)
+        bm25_idx = build_bm25_index(all_chunks)
+
+        query = "What does RRF stand for?"
+        results = retrieve(
+            query=query,
+            store=store,
+            bm25_index=bm25_idx,
+            k=5,
+            threshold=0.99,  # Force lexical qualification only
+        )
+
+        self.assertEqual(len(results), 1)
+        self.assertEqual(results[0].chunk_id, "c_rrf")
+        self.assertIn("RRF", results[0].text)
+
+    def test_relative_semantic_margin_accepts_strong_and_rejects_distractor(self):
+        """Candidates with semantic score >= 0.35 but < 70% of top semantic score are rejected."""
+        # Query embedded with mock so we have exact deterministic semantic scores:
+        # Candidate 1 (strong target): cosine similarity 0.70 (top_sem = 0.70)
+        # Candidate 2 (distractor): cosine similarity 0.42 (0.42 >= 0.35, but 0.42 / 0.70 = 0.60 < 0.70)
+        # Candidate 3 (background): cosine similarity 0.20
+        chunk_target = ChunkDocument(
+            chunk_id="c_top", doc_id="d1", source_filename="target.pdf", page_number=1, total_pages=1, chunk_index=0,
+            text="Project Atlas retrieval recall metric 0.82 benchmark", char_count=52
+        )
+        chunk_distractor = ChunkDocument(
+            chunk_id="c_dist", doc_id="d2", source_filename="distractor.pdf", page_number=1, total_pages=1, chunk_index=0,
+            text="General overview of document processing architectures", char_count=54
+        )
+        chunk_bg = ChunkDocument(
+            chunk_id="c_bg", doc_id="d3", source_filename="bg.pdf", page_number=1, total_pages=1, chunk_index=0,
+            text="System telemetry and operating parameters description", char_count=54
+        )
+
+        all_chunks = [chunk_target, chunk_distractor, chunk_bg]
+        embedded = embed_chunks(all_chunks)
+        store = build_vector_store(embedded)
+        bm25_idx = build_bm25_index(all_chunks)
+
+        # Mock similarity_search to return controlled semantic scores:
+        # top = 0.70, distractor = 0.42 (60% of top, above 0.35), bg = 0.20
+        doc_top = MagicMock()
+        doc_top.metadata = chunk_target.__dict__
+        doc_top.page_content = chunk_target.text
+
+        doc_dist = MagicMock()
+        doc_dist.metadata = chunk_distractor.__dict__
+        doc_dist.page_content = chunk_distractor.text
+
+        doc_bg = MagicMock()
+        doc_bg.metadata = chunk_bg.__dict__
+        doc_bg.page_content = chunk_bg.text
+
+        mock_sem_results = [(doc_top, 0.70), (doc_dist, 0.42), (doc_bg, 0.20)]
+
+        with patch("app.rag.retriever.similarity_search", return_value=mock_sem_results):
+            # Query has no lexical overlap with any chunk to test pure semantic gating
+            query = "unmatched question with unique keywords"
+            results = retrieve(
+                query=query,
+                store=store,
+                bm25_index=bm25_idx,
+                k=5,
+            )
+
+        cids = [r.chunk_id for r in results]
+        self.assertIn("c_top", cids, "Strong top semantic candidate must qualify")
+        self.assertNotIn(
+            "c_dist",
+            cids,
+            "Distractor below 70% of top semantic score must be rejected despite exceeding 0.35",
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

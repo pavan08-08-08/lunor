@@ -107,11 +107,14 @@ def retrieve(
     semantic_results = similarity_search(store=store, query_embedding=query_vector, k=semantic_k)
     lexical_results = bm25_search(index=bm25_index, query=query, k=lexical_k)
 
+    top_bm25_score = lexical_results[0][1] if lexical_results else 0.0
+
     rrf_k = 60
     rrf_scores: dict[str, float] = {}
     chunk_info: dict[str, dict] = {}
     semantic_scores: dict[str, float] = {}
     lexical_ranks: dict[str, int] = {}
+    lexical_scores: dict[str, float] = {}
 
     for rank, (doc, score) in enumerate(semantic_results, 1):
         cid = doc.metadata["chunk_id"]
@@ -131,6 +134,7 @@ def retrieve(
         cid = rec["chunk_id"]
         rrf_scores[cid] = rrf_scores.get(cid, 0.0) + (1.0 / (rrf_k + rank))
         lexical_ranks[cid] = rank
+        lexical_scores[cid] = score
         if cid not in chunk_info:
             chunk_info[cid] = {
                 "chunk_id": cid,
@@ -148,18 +152,30 @@ def retrieve(
     if not content_tokens:
         content_tokens = q_tokens
 
+    top_sem_score = max(semantic_scores.values()) if semantic_scores else 0.0
+
     # Relevance qualification gate
     qualified_chunks: list[RetrievedChunk] = []
     for cid, rrf_score in sorted(rrf_scores.items(), key=lambda item: item[1], reverse=True):
         sem_score = semantic_scores.get(cid, 0.0)
         lex_rank = lexical_ranks.get(cid, 999)
+        lex_score = lexical_scores.get(cid, 0.0)
         meta = chunk_info[cid]
         c_tokens = set(tokenize(meta["text"]))
         has_overlap = bool(content_tokens & c_tokens)
 
-        # Dual evidence: semantic confidence OR top-rank lexical match with content overlap
-        passes_sem = sem_score >= threshold
-        passes_lex = lex_rank <= 3 and has_overlap
+        # Dual evidence: semantic confidence (with relative score margin) OR
+        # top-rank lexical match with content overlap and at least 50% of top BM25 score.
+        passes_sem = (
+            sem_score >= threshold
+            and sem_score >= 0.70 * top_sem_score
+        )
+        passes_lex = (
+            lex_rank <= 3
+            and has_overlap
+            and top_bm25_score > 0.0
+            and lex_score >= 0.50 * top_bm25_score
+        )
 
         if passes_sem or passes_lex:
             qualified_chunks.append(
