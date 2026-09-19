@@ -64,7 +64,14 @@ class TestAPI(unittest.TestCase):
         mock_retrieve.return_value = [MagicMock()]
         mock_generate.return_value = GeneratedAnswer(
             answer="Overfitting occurs when a model learns noise.",
-            sources=[SourceCitation(source_filename="ml.pdf", page_number=3)],
+            sources=[
+                SourceCitation(
+                    source_filename="ml.pdf",
+                    page_number=3,
+                    chunk_id="ml_p3_c0",
+                    text="Overfitting occurs when a model learns noise.",
+                )
+            ],
             has_sufficient_context=True,
         )
 
@@ -77,6 +84,8 @@ class TestAPI(unittest.TestCase):
             self.assertEqual(len(data["sources"]), 1)
             self.assertEqual(data["sources"][0]["source_filename"], "ml.pdf")
             self.assertEqual(data["sources"][0]["page_number"], 3)
+            self.assertEqual(data["sources"][0]["chunk_id"], "ml_p3_c0")
+            self.assertEqual(data["sources"][0]["text"], "Overfitting occurs when a model learns noise.")
 
     @patch("app.api.chat.generate_answer")
     @patch("app.api.chat.retrieve")
@@ -371,6 +380,432 @@ class TestAPI(unittest.TestCase):
                 delete_document("../../etc/passwords.pdf")
             self.assertEqual(ctx.exception.status_code, 400)
             self.assertIn("invalid", ctx.exception.detail.lower())
+
+    def _create_test_pdf(self, path: Path, text: str = "Sample document text") -> bytes:
+        """Helper to create a valid 1-page PDF file with specified text."""
+        import pymupdf
+        doc = pymupdf.open()
+        page = doc.new_page()
+        page.insert_text((72, 72), text)
+        pdf_bytes = doc.tobytes()
+        doc.close()
+        path.write_bytes(pdf_bytes)
+        return pdf_bytes
+
+    def test_get_document_file_without_chunk_id(self):
+        """GET /api/documents/{filename}/file without chunk_id serves original PDF."""
+        pdf_path = self.uploads_dir / "whitepaper.pdf"
+        self._create_test_pdf(pdf_path, "System architecture overview")
+
+        with patch("app.api.documents.UPLOADS_DIR", self.uploads_dir):
+            response = self.client.get("/api/documents/whitepaper.pdf/file")
+            self.assertEqual(response.status_code, 200)
+            self.assertEqual(response.headers.get("content-type"), "application/pdf")
+            self.assertIn("inline", response.headers.get("content-disposition", ""))
+            self.assertIn("whitepaper.pdf", response.headers.get("content-disposition", ""))
+            self.assertEqual(response.content, pdf_path.read_bytes())
+
+    def test_get_document_file_with_valid_chunk_id_highlights_in_memory(self):
+        """GET /api/documents/{filename}/file with valid chunk_id highlights text without altering disk file."""
+        import pickle
+        import pymupdf
+        from app.rag.bm25_store import BM25Index
+
+        pdf_path = self.uploads_dir / "01_Project_Atlas.pdf"
+        evidence_text = "Project Atlas achieved recall@5 = 0.82."
+        original_bytes = self._create_test_pdf(pdf_path, evidence_text)
+
+        # Mock BM25 index with authoritative chunk metadata
+        bm25_data = BM25Index(
+            bm25=None,
+            chunks=[
+                {
+                    "chunk_id": "atlas_p1_c0",
+                    "doc_id": "doc123",
+                    "source_filename": "01_Project_Atlas.pdf",
+                    "page_number": 1,
+                    "total_pages": 1,
+                    "chunk_index": 0,
+                    "text": evidence_text,
+                }
+            ],
+        )
+        with open(self.vectorstore_dir / "bm25.pkl", "wb") as f:
+            pickle.dump(bm25_data, f)
+
+        with patch("app.api.documents.UPLOADS_DIR", self.uploads_dir), \
+             patch("app.api.documents.VECTORSTORE_DIR", self.vectorstore_dir):
+            response = self.client.get(
+                "/api/documents/01_Project_Atlas.pdf/file",
+                params={"chunk_id": "atlas_p1_c0"},
+            )
+            self.assertEqual(response.status_code, 200)
+            self.assertEqual(response.headers.get("content-type"), "application/pdf")
+
+            # Check that returned PDF has a highlight annotation
+            annotated_doc = pymupdf.open(stream=response.content, filetype="pdf")
+            annots = list(annotated_doc[0].annots())
+            self.assertEqual(len(annots), 1)
+            annotated_doc.close()
+
+            # Confirm original PDF on disk was never altered
+            self.assertEqual(pdf_path.read_bytes(), original_bytes)
+
+    def test_get_document_file_missing_pdf_returns_404(self):
+        """GET /api/documents/{filename}/file returns 404 when file does not exist."""
+        with patch("app.api.documents.UPLOADS_DIR", self.uploads_dir):
+            response = self.client.get("/api/documents/ghost.pdf/file")
+            self.assertEqual(response.status_code, 404)
+            self.assertIn("not found", response.json()["detail"].lower())
+
+    def test_get_document_file_path_traversal_rejected(self):
+        """Path traversal attempts in file endpoint return HTTP 400."""
+        with patch("app.api.documents.UPLOADS_DIR", self.uploads_dir):
+            res1 = self.client.get("/api/documents/..%5Cpasswords.pdf/file")
+            self.assertEqual(res1.status_code, 400)
+            self.assertIn("invalid", res1.json()["detail"].lower())
+
+    def test_get_document_file_nonexistent_chunk_id_returns_404(self):
+        """Supplying a nonexistent chunk_id returns 404."""
+        pdf_path = self.uploads_dir / "doc.pdf"
+        self._create_test_pdf(pdf_path, "Content")
+
+        with patch("app.api.documents.UPLOADS_DIR", self.uploads_dir), \
+             patch("app.api.documents.VECTORSTORE_DIR", self.vectorstore_dir):
+            response = self.client.get(
+                "/api/documents/doc.pdf/file",
+                params={"chunk_id": "nonexistent_c99"},
+            )
+            self.assertEqual(response.status_code, 404)
+            self.assertIn("chunk not found", response.json()["detail"].lower())
+
+    def test_get_document_file_chunk_document_mismatch_returns_400(self):
+        """Supplying a chunk_id that belongs to another document returns 400."""
+        import pickle
+        from app.rag.bm25_store import BM25Index
+
+        pdf_path = self.uploads_dir / "target.pdf"
+        self._create_test_pdf(pdf_path, "Target content")
+
+        bm25_data = BM25Index(
+            bm25=None,
+            chunks=[
+                {
+                    "chunk_id": "other_p1_c0",
+                    "doc_id": "doc456",
+                    "source_filename": "other.pdf",
+                    "page_number": 1,
+                    "total_pages": 1,
+                    "chunk_index": 0,
+                    "text": "Other document content",
+                }
+            ],
+        )
+        with open(self.vectorstore_dir / "bm25.pkl", "wb") as f:
+            pickle.dump(bm25_data, f)
+
+        with patch("app.api.documents.UPLOADS_DIR", self.uploads_dir), \
+             patch("app.api.documents.VECTORSTORE_DIR", self.vectorstore_dir):
+            response = self.client.get(
+                "/api/documents/target.pdf/file",
+                params={"chunk_id": "other_p1_c0"},
+            )
+            self.assertEqual(response.status_code, 400)
+            self.assertIn("belong", response.json()["detail"].lower())
+
+    def test_get_document_file_unsearchable_chunk_returns_unannotated_pdf(self):
+        """When chunk text cannot be located on the page, endpoint still returns valid PDF."""
+        import pickle
+        import pymupdf
+        from app.rag.bm25_store import BM25Index
+
+        pdf_path = self.uploads_dir / "unsearchable.pdf"
+        self._create_test_pdf(pdf_path, "Real page text")
+
+        bm25_data = BM25Index(
+            bm25=None,
+            chunks=[
+                {
+                    "chunk_id": "unsearch_p1_c0",
+                    "doc_id": "doc789",
+                    "source_filename": "unsearchable.pdf",
+                    "page_number": 1,
+                    "total_pages": 1,
+                    "chunk_index": 0,
+                    "text": "Completely different text that does not exist in the PDF",
+                }
+            ],
+        )
+        with open(self.vectorstore_dir / "bm25.pkl", "wb") as f:
+            pickle.dump(bm25_data, f)
+
+        with patch("app.api.documents.UPLOADS_DIR", self.uploads_dir), \
+             patch("app.api.documents.VECTORSTORE_DIR", self.vectorstore_dir):
+            response = self.client.get(
+                "/api/documents/unsearchable.pdf/file",
+                params={"chunk_id": "unsearch_p1_c0"},
+            )
+            self.assertEqual(response.status_code, 200)
+            self.assertEqual(response.headers.get("content-type"), "application/pdf")
+
+            # Check that PDF has no highlight annotations
+            doc = pymupdf.open(stream=response.content, filetype="pdf")
+            self.assertIsNone(doc[0].first_annot)
+            doc.close()
+
+    def test_get_document_page_success_with_highlight_coordinates(self):
+        """GET /api/documents/{filename}/page returns vector SVG and precise highlight coordinates without altering disk."""
+        import pickle
+        from app.rag.bm25_store import BM25Index
+
+        pdf_path = self.uploads_dir / "01_Project_Atlas.pdf"
+        full_text = (
+            "Architecture\n\n"
+            "In an internal experiment, Atlas achieved a retrieval recall@5 of 0.82 on the baseline question set.\n\n"
+            "Evaluation"
+        )
+        original_bytes = self._create_test_pdf(pdf_path, full_text)
+
+        bm25_data = BM25Index(
+            bm25=None,
+            chunks=[
+                {
+                    "chunk_id": "atlas_p1_c0",
+                    "doc_id": "doc123",
+                    "source_filename": "01_Project_Atlas.pdf",
+                    "page_number": 1,
+                    "total_pages": 1,
+                    "chunk_index": 0,
+                    "text": full_text,
+                }
+            ],
+        )
+        with open(self.vectorstore_dir / "bm25.pkl", "wb") as f:
+            pickle.dump(bm25_data, f)
+
+        with patch("app.api.documents.UPLOADS_DIR", self.uploads_dir), \
+             patch("app.api.documents.VECTORSTORE_DIR", self.vectorstore_dir):
+            response = self.client.get(
+                "/api/documents/01_Project_Atlas.pdf/page",
+                params={
+                    "page_number": 1,
+                    "chunk_id": "atlas_p1_c0",
+                    "query": "What was the recall@5 achieved by Project Atlas?",
+                },
+            )
+            self.assertEqual(response.status_code, 200)
+            data = response.json()
+            self.assertEqual(data["filename"], "01_Project_Atlas.pdf")
+            self.assertEqual(data["page_number"], 1)
+            self.assertEqual(data["total_pages"], 1)
+            self.assertGreater(data["page_width"], 0)
+            self.assertGreater(data["page_height"], 0)
+            self.assertTrue(data["svg"].startswith("<svg"))
+            self.assertIn("Atlas achieved a retrieval recall@5 of 0.82", data["evidence_text"])
+            self.assertNotIn("Architecture", data["evidence_text"])
+            self.assertGreater(len(data["highlights"]), 0)
+            for h in data["highlights"]:
+                self.assertIn("x", h)
+                self.assertIn("y", h)
+                self.assertIn("width", h)
+                self.assertIn("height", h)
+
+            # Confirm original disk file remains completely untouched
+            self.assertEqual(pdf_path.read_bytes(), original_bytes)
+
+    def test_get_document_page_missing_pdf_returns_404(self):
+        """GET /api/documents/{filename}/page returns 404 if file does not exist."""
+        with patch("app.api.documents.UPLOADS_DIR", self.uploads_dir):
+            response = self.client.get("/api/documents/nonexistent.pdf/page")
+            self.assertEqual(response.status_code, 404)
+            self.assertIn("not found", response.json()["detail"].lower())
+
+    def test_get_document_page_invalid_page_number_returns_400(self):
+        """GET /api/documents/{filename}/page returns 400 for out-of-bounds page numbers."""
+        pdf_path = self.uploads_dir / "sample.pdf"
+        self._create_test_pdf(pdf_path, "Sample page")
+
+        with patch("app.api.documents.UPLOADS_DIR", self.uploads_dir):
+            res_zero = self.client.get("/api/documents/sample.pdf/page", params={"page_number": 0})
+            self.assertEqual(res_zero.status_code, 400)
+            self.assertIn("invalid page number", res_zero.json()["detail"].lower())
+
+            res_high = self.client.get("/api/documents/sample.pdf/page", params={"page_number": 99})
+            self.assertEqual(res_high.status_code, 400)
+            self.assertIn("invalid page number", res_high.json()["detail"].lower())
+
+    def test_get_document_page_path_traversal_rejected(self):
+        """Path traversal attempts in page endpoint return HTTP 400."""
+        with patch("app.api.documents.UPLOADS_DIR", self.uploads_dir):
+            response = self.client.get("/api/documents/..%5Cpasswords.pdf/page")
+            self.assertEqual(response.status_code, 400)
+            self.assertIn("invalid", response.json()["detail"].lower())
+
+    def test_get_document_page_chunk_document_mismatch_returns_400(self):
+        """Supplying a chunk_id belonging to a different document returns 400."""
+        import pickle
+        from app.rag.bm25_store import BM25Index
+
+        pdf_path = self.uploads_dir / "doc_a.pdf"
+        self._create_test_pdf(pdf_path, "Doc A text")
+
+        bm25_data = BM25Index(
+            bm25=None,
+            chunks=[
+                {
+                    "chunk_id": "chunk_b",
+                    "doc_id": "doc_b",
+                    "source_filename": "doc_b.pdf",
+                    "page_number": 1,
+                    "total_pages": 1,
+                    "chunk_index": 0,
+                    "text": "Doc B text",
+                }
+            ],
+        )
+        with open(self.vectorstore_dir / "bm25.pkl", "wb") as f:
+            pickle.dump(bm25_data, f)
+
+        with patch("app.api.documents.UPLOADS_DIR", self.uploads_dir), \
+             patch("app.api.documents.VECTORSTORE_DIR", self.vectorstore_dir):
+            response = self.client.get(
+                "/api/documents/doc_a.pdf/page",
+                params={"chunk_id": "chunk_b"},
+            )
+            self.assertEqual(response.status_code, 400)
+            self.assertIn("belong", response.json()["detail"].lower())
+
+    def test_get_document_page_nonexistent_chunk_returns_404(self):
+        """Supplying an unknown chunk_id returns 404."""
+        pdf_path = self.uploads_dir / "doc.pdf"
+        self._create_test_pdf(pdf_path, "Content")
+
+        with patch("app.api.documents.UPLOADS_DIR", self.uploads_dir), \
+             patch("app.api.documents.VECTORSTORE_DIR", self.vectorstore_dir):
+            response = self.client.get(
+                "/api/documents/doc.pdf/page",
+                params={"chunk_id": "unknown_chunk_id"},
+            )
+            self.assertEqual(response.status_code, 404)
+            self.assertIn("chunk not found", response.json()["detail"].lower())
+
+    def test_atlas_highlight_y_coordinate_and_svg_render(self):
+        """Atlas recall@5 query highlight has y-coordinate corresponding to Evaluation text, not intro paragraph."""
+        import pickle
+        from app.rag.bm25_store import BM25Index
+
+        pdf_path = self.uploads_dir / "01_Project_Atlas.pdf"
+        full_text = (
+            "Project Atlas\n\n"
+            "Project Atlas is a document retrieval platform designed for research teams.\n\n"
+            "Architecture\n\n"
+            "Atlas uses a hybrid retrieval pipeline combining semantic embeddings and sparse lexical matching.\n\n"
+            "Evaluation\n\n"
+            "In an internal experiment, Atlas achieved a retrieval recall@5 of 0.82 on the baseline question set.\n"
+            "The team considers recall@5 the primary retrieval metric for this experiment."
+        )
+        self._create_test_pdf(pdf_path, full_text)
+
+        evidence_sentence = "In an internal experiment, Atlas achieved a retrieval recall@5 of 0.82 on the baseline question set."
+        bm25_data = BM25Index(
+            bm25=None,
+            chunks=[
+                {
+                    "chunk_id": "atlas_chunk_0",
+                    "doc_id": "atlas_doc",
+                    "source_filename": "01_Project_Atlas.pdf",
+                    "page_number": 1,
+                    "total_pages": 1,
+                    "chunk_index": 0,
+                    "text": full_text,
+                }
+            ],
+        )
+        with open(self.vectorstore_dir / "bm25.pkl", "wb") as f:
+            pickle.dump(bm25_data, f)
+
+        with patch("app.api.documents.UPLOADS_DIR", self.uploads_dir), \
+             patch("app.api.documents.VECTORSTORE_DIR", self.vectorstore_dir):
+            response = self.client.get(
+                "/api/documents/01_Project_Atlas.pdf/page",
+                params={
+                    "page_number": 1,
+                    "chunk_id": "atlas_chunk_0",
+                    "query": "What was the recall@5 achieved by Project Atlas?",
+                    "evidence_text": evidence_sentence,
+                },
+            )
+            self.assertEqual(response.status_code, 200)
+            data = response.json()
+            self.assertEqual(data["evidence_text"], evidence_sentence)
+            self.assertGreater(len(data["highlights"]), 0)
+
+            # Check that the highlight rectangle corresponds to Evaluation section (y > 200),
+            # NOT the introductory Project Atlas paragraph (y ~ 105)
+            atlas_h = data["highlights"][0]
+            self.assertGreater(atlas_h["y"], 200.0)
+            self.assertNotIn("Project Atlas is a document retrieval platform", data["evidence_text"])
+
+            # Verify that the generated SVG itself contains the drawn highlight
+            self.assertIn("fill=\"#ffa600\"", data["svg"])
+            self.assertIn("fill-opacity=\".3\"", data["svg"])
+
+    def test_rrf_highlight_in_architecture_section(self):
+        """RRF query highlight covers Reciprocal Rank Fusion in the Architecture section."""
+        import pickle
+        from app.rag.bm25_store import BM25Index
+
+        pdf_path = self.uploads_dir / "01_Project_Atlas.pdf"
+        full_text = (
+            "Project Atlas\n\n"
+            "Project Atlas is a document retrieval platform designed for research teams.\n\n"
+            "Architecture\n\n"
+            "Atlas uses a hybrid retrieval pipeline. It combines dense semantic retrieval with BM25 lexical "
+            "retrieval and then combines their rankings using Reciprocal Rank Fusion (RRF).\n\n"
+            "Evaluation\n\n"
+            "In an internal experiment, Atlas achieved a retrieval recall@5 of 0.82 on the baseline question set."
+        )
+        self._create_test_pdf(pdf_path, full_text)
+
+        bm25_data = BM25Index(
+            bm25=None,
+            chunks=[
+                {
+                    "chunk_id": "atlas_chunk_0",
+                    "doc_id": "atlas_doc",
+                    "source_filename": "01_Project_Atlas.pdf",
+                    "page_number": 1,
+                    "total_pages": 1,
+                    "chunk_index": 0,
+                    "text": full_text,
+                }
+            ],
+        )
+        with open(self.vectorstore_dir / "bm25.pkl", "wb") as f:
+            pickle.dump(bm25_data, f)
+
+        with patch("app.api.documents.UPLOADS_DIR", self.uploads_dir), \
+             patch("app.api.documents.VECTORSTORE_DIR", self.vectorstore_dir):
+            response = self.client.get(
+                "/api/documents/01_Project_Atlas.pdf/page",
+                params={
+                    "page_number": 1,
+                    "chunk_id": "atlas_chunk_0",
+                    "query": "What does RRF stand for?",
+                },
+            )
+            self.assertEqual(response.status_code, 200)
+            data = response.json()
+            self.assertIn("Reciprocal Rank Fusion (RRF)", data["evidence_text"])
+            self.assertGreater(len(data["highlights"]), 0)
+
+            # RRF is in Architecture section (y between 120 and 220)
+            for h in data["highlights"]:
+                self.assertGreaterEqual(h["y"], 120.0)
+                self.assertLess(h["y"], 240.0)
+
+            # Generated SVG contains the highlight
+            self.assertIn("fill=\"#ffa600\"", data["svg"])
 
 
 if __name__ == "__main__":

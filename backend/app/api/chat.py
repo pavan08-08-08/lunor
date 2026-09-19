@@ -31,6 +31,9 @@ class ChatRequest(BaseModel):
 class SourceCitationModel(BaseModel):
     source_filename: str
     page_number: int
+    chunk_id: str
+    text: str
+    evidence_text: str = ""
 
 
 class ChatResponse(BaseModel):
@@ -87,6 +90,9 @@ def chat(request: ChatRequest) -> ChatResponse:
             SourceCitationModel(
                 source_filename=s.source_filename,
                 page_number=s.page_number,
+                chunk_id=s.chunk_id,
+                text=s.text,
+                evidence_text=s.evidence_text,
             )
             for s in generated.sources
         ],

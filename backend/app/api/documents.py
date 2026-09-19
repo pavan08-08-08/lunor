@@ -1,12 +1,15 @@
 import logging
 from pathlib import Path
 from fastapi import APIRouter, File, HTTPException, UploadFile
+from fastapi.responses import FileResponse, Response
+import pymupdf
 from pydantic import BaseModel
 
 from app.config import UPLOADS_DIR, VECTORSTORE_DIR, ensure_directories
-from app.rag.bm25_store import build_bm25_index, save_bm25_index
+from app.rag.bm25_store import build_bm25_index, load_bm25_index, save_bm25_index
 from app.rag.chunker import ChunkDocument, chunk_pages
 from app.rag.embeddings import embed_chunks
+from app.rag.evidence import extract_evidence_passage, locate_evidence_rectangles
 from app.rag.loader import PDFLoadError, load_pdf
 from app.rag.vector_store import build_vector_store, save_vector_store
 
@@ -34,6 +37,24 @@ class DocumentDeleteResponse(BaseModel):
     message: str
     filename: str
     remaining_documents: int
+
+
+class HighlightRect(BaseModel):
+    x: float
+    y: float
+    width: float
+    height: float
+
+
+class PageRenderResponse(BaseModel):
+    filename: str
+    page_number: int
+    total_pages: int
+    page_width: float
+    page_height: float
+    svg: str
+    evidence_text: str
+    highlights: list[HighlightRect]
 
 
 def _cleanup_vector_store_files() -> None:
@@ -183,4 +204,230 @@ def delete_document(filename: str) -> DocumentDeleteResponse:
         message="Document deleted successfully",
         filename=safe_filename,
         remaining_documents=len(remaining_files),
+    )
+
+
+@router.get("/{filename}/page", response_model=PageRenderResponse)
+def get_document_page(
+    filename: str,
+    page_number: int = 1,
+    chunk_id: str | None = None,
+    query: str | None = None,
+    evidence_text: str | None = None,
+) -> PageRenderResponse:
+    """Render a single page of a PDF as crisp SVG with backend-drawn evidence highlight."""
+    if not filename or not filename.strip():
+        raise HTTPException(status_code=400, detail="Filename cannot be empty")
+
+    raw_name = filename.strip()
+    safe_filename = Path(raw_name).name
+
+    # Reject directory traversal attempts or invalid filenames
+    if safe_filename != raw_name or "/" in raw_name or "\\" in raw_name or safe_filename in (".", ".."):
+        raise HTTPException(status_code=400, detail="Invalid filename")
+
+    if not safe_filename.lower().endswith(".pdf"):
+        raise HTTPException(status_code=400, detail="Only PDF files can be accessed")
+
+    ensure_directories()
+    target_path = (UPLOADS_DIR / safe_filename).resolve()
+
+    # Verify target path remains within UPLOADS_DIR
+    if target_path.parent != UPLOADS_DIR.resolve():
+        raise HTTPException(status_code=400, detail="Invalid file path")
+
+    if not target_path.exists() or not target_path.is_file():
+        raise HTTPException(status_code=404, detail="Document not found")
+
+    resolved_evidence = (evidence_text or "").strip()
+    if chunk_id is not None:
+        chunk_id = chunk_id.strip()
+        if not chunk_id:
+            raise HTTPException(status_code=400, detail="Chunk ID cannot be empty")
+
+        bm25_file = VECTORSTORE_DIR / "bm25.pkl"
+        matching_chunk = None
+        if bm25_file.exists():
+            try:
+                bm25_index = load_bm25_index(str(VECTORSTORE_DIR))
+                matching_chunk = next(
+                    (c for c in bm25_index.chunks if c.get("chunk_id") == chunk_id),
+                    None,
+                )
+            except Exception as exc:
+                logger.warning("Could not load BM25 index to validate chunk %s: %s", chunk_id, exc)
+
+        if not matching_chunk:
+            raise HTTPException(status_code=404, detail="Chunk not found")
+
+        if matching_chunk.get("source_filename") != safe_filename:
+            raise HTTPException(
+                status_code=400,
+                detail="Chunk does not belong to the requested document",
+            )
+
+        if not resolved_evidence:
+            chunk_text = matching_chunk.get("text", "")
+            resolved_evidence = extract_evidence_passage(chunk_text, query=query or "")
+
+    try:
+        raw_bytes = target_path.read_bytes()
+        doc = pymupdf.open(stream=raw_bytes, filetype="pdf")
+    except Exception as exc:
+        logger.error("Failed to open PDF %s: %s", safe_filename, exc)
+        raise HTTPException(status_code=500, detail="Failed to read document")
+
+    total_pages = len(doc)
+    if total_pages == 0:
+        doc.close()
+        raise HTTPException(status_code=400, detail="Document contains no pages")
+
+    if page_number < 1 or page_number > total_pages:
+        doc.close()
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid page number {page_number}. Document has {total_pages} page(s).",
+        )
+
+    page_idx = page_number - 1
+    page_obj = doc[page_idx]
+    page_width = round(float(page_obj.rect.width), 2)
+    page_height = round(float(page_obj.rect.height), 2)
+
+    highlights: list[HighlightRect] = []
+    if resolved_evidence:
+        rect_dicts = locate_evidence_rectangles(page_obj, resolved_evidence)
+        highlights = [HighlightRect(**r) for r in rect_dicts]
+
+        # Draw translucent highlight rectangle directly onto the PyMuPDF page in memory
+        for r in rect_dicts:
+            page_obj.draw_rect(
+                pymupdf.Rect(r["x"], r["y"], r["x"] + r["width"], r["y"] + r["height"]),
+                color=(1.0, 0.65, 0.0),
+                fill=(1.0, 0.65, 0.0),
+                fill_opacity=0.30,
+                overlay=False,
+            )
+
+    # Generate SVG after drawing the highlight so vector text and highlight are perfectly aligned
+    svg_content = page_obj.get_svg_image()
+    doc.close()
+
+    return PageRenderResponse(
+        filename=safe_filename,
+        page_number=page_number,
+        total_pages=total_pages,
+        page_width=page_width,
+        page_height=page_height,
+        svg=svg_content,
+        evidence_text=resolved_evidence,
+        highlights=highlights,
+    )
+
+
+@router.get("/{filename}/file")
+def get_document_file(
+    filename: str,
+    page: int | None = None,
+    chunk_id: str | None = None,
+    query: str | None = None,
+) -> Response:
+    """Serve the raw or in-memory highlighted PDF file for citation evidence viewing."""
+    if not filename or not filename.strip():
+        raise HTTPException(status_code=400, detail="Filename cannot be empty")
+
+    raw_name = filename.strip()
+    safe_filename = Path(raw_name).name
+
+    # Reject directory traversal attempts or invalid filenames
+    if safe_filename != raw_name or "/" in raw_name or "\\" in raw_name or safe_filename in (".", ".."):
+        raise HTTPException(status_code=400, detail="Invalid filename")
+
+    if not safe_filename.lower().endswith(".pdf"):
+        raise HTTPException(status_code=400, detail="Only PDF files can be accessed")
+
+    ensure_directories()
+    target_path = (UPLOADS_DIR / safe_filename).resolve()
+
+    # Verify target path remains within UPLOADS_DIR
+    if target_path.parent != UPLOADS_DIR.resolve():
+        raise HTTPException(status_code=400, detail="Invalid file path")
+
+    if not target_path.exists() or not target_path.is_file():
+        raise HTTPException(status_code=404, detail="Document not found")
+
+    if chunk_id is not None:
+        chunk_id = chunk_id.strip()
+        if not chunk_id:
+            raise HTTPException(status_code=400, detail="Chunk ID cannot be empty")
+
+        bm25_file = VECTORSTORE_DIR / "bm25.pkl"
+        matching_chunk = None
+        if bm25_file.exists():
+            try:
+                bm25_index = load_bm25_index(str(VECTORSTORE_DIR))
+                matching_chunk = next(
+                    (c for c in bm25_index.chunks if c.get("chunk_id") == chunk_id),
+                    None,
+                )
+            except Exception as exc:
+                logger.warning("Could not load BM25 index to validate chunk %s: %s", chunk_id, exc)
+
+        if not matching_chunk:
+            raise HTTPException(status_code=404, detail="Chunk not found")
+
+        if matching_chunk.get("source_filename") != safe_filename:
+            raise HTTPException(
+                status_code=400,
+                detail="Chunk does not belong to the requested document",
+            )
+
+        target_page = matching_chunk.get("page_number", 1)
+        chunk_text = matching_chunk.get("text", "")
+        evidence_text = extract_evidence_passage(chunk_text, query=query or "")
+
+        try:
+            # Highlight on in-memory copy without altering disk file
+            raw_bytes = target_path.read_bytes()
+            doc = pymupdf.open(stream=raw_bytes, filetype="pdf")
+            page_idx = target_page - 1
+            if 0 <= page_idx < len(doc):
+                page_obj = doc[page_idx]
+                rect_dicts = locate_evidence_rectangles(page_obj, evidence_text) if evidence_text else []
+                if rect_dicts:
+                    rects = [
+                        pymupdf.Rect(r["x"], r["y"], r["x"] + r["width"], r["y"] + r["height"])
+                        for r in rect_dicts
+                    ]
+                    annot = page_obj.add_highlight_annot(rects)
+                    annot.set_colors(stroke=(1.0, 0.9, 0.2))  # warm yellow
+                    annot.update()
+
+            annotated_bytes = doc.tobytes(garbage=3, deflate=True)
+            doc.close()
+
+            return Response(
+                content=annotated_bytes,
+                media_type="application/pdf",
+                headers={
+                    "Content-Disposition": f'inline; filename="{safe_filename}"',
+                },
+            )
+        except Exception as exc:
+            logger.error("Failed to generate in-memory highlighted PDF: %s", exc, exc_info=True)
+            # Fall back to serving original unannotated PDF rather than failing
+            return FileResponse(
+                path=target_path,
+                media_type="application/pdf",
+                headers={
+                    "Content-Disposition": f'inline; filename="{safe_filename}"',
+                },
+            )
+
+    return FileResponse(
+        path=target_path,
+        media_type="application/pdf",
+        headers={
+            "Content-Disposition": f'inline; filename="{safe_filename}"',
+        },
     )

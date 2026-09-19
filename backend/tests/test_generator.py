@@ -135,8 +135,8 @@ class TestGenerator(unittest.TestCase):
         mock_get_client.return_value = mock_client
 
         chunks = [
-            _make_retrieved_chunk(source_filename="doc_A.pdf", page_number=2),
-            _make_retrieved_chunk(source_filename="doc_B.pdf", page_number=5),
+            _make_retrieved_chunk(chunk_id="c_A", text="Text A", source_filename="doc_A.pdf", page_number=2),
+            _make_retrieved_chunk(chunk_id="c_B", text="Text B", source_filename="doc_B.pdf", page_number=5),
         ]
 
         res = generate_answer("Explain both documents", chunks)
@@ -144,14 +144,26 @@ class TestGenerator(unittest.TestCase):
         self.assertEqual(
             res.sources,
             [
-                SourceCitation(source_filename="doc_A.pdf", page_number=2),
-                SourceCitation(source_filename="doc_B.pdf", page_number=5),
+                SourceCitation(
+                    source_filename="doc_A.pdf",
+                    page_number=2,
+                    chunk_id="c_A",
+                    text="Text A",
+                    evidence_text="Text A",
+                ),
+                SourceCitation(
+                    source_filename="doc_B.pdf",
+                    page_number=5,
+                    chunk_id="c_B",
+                    text="Text B",
+                    evidence_text="Text B",
+                ),
             ],
         )
 
     @patch("app.rag.generator.get_gemini_client")
-    def test_duplicate_page_sources_are_deduplicated(self, mock_get_client):
-        """Multiple chunks from the same (filename, page) are deduplicated while preserving order."""
+    def test_distinct_chunks_on_same_page_remain_distinct_citations(self, mock_get_client):
+        """Distinct chunks on the same page remain distinct citations, while duplicate chunk_ids are deduplicated."""
         mock_client = MagicMock()
         mock_response = MagicMock()
         mock_response.text = "Answer from repeated page."
@@ -159,10 +171,10 @@ class TestGenerator(unittest.TestCase):
         mock_get_client.return_value = mock_client
 
         chunks = [
-            _make_retrieved_chunk(source_filename="paper.pdf", page_number=4, chunk_index=0),
-            _make_retrieved_chunk(source_filename="paper.pdf", page_number=4, chunk_index=1),
-            _make_retrieved_chunk(source_filename="paper.pdf", page_number=5, chunk_index=0),
-            _make_retrieved_chunk(source_filename="paper.pdf", page_number=4, chunk_index=2),
+            _make_retrieved_chunk(chunk_id="c1", text="Chunk 1", source_filename="paper.pdf", page_number=4),
+            _make_retrieved_chunk(chunk_id="c2", text="Chunk 2", source_filename="paper.pdf", page_number=4),
+            _make_retrieved_chunk(chunk_id="c1", text="Chunk 1", source_filename="paper.pdf", page_number=4),
+            _make_retrieved_chunk(chunk_id="c3", text="Chunk 3", source_filename="paper.pdf", page_number=5),
         ]
 
         res = generate_answer("Question", chunks)
@@ -170,8 +182,27 @@ class TestGenerator(unittest.TestCase):
         self.assertEqual(
             res.sources,
             [
-                SourceCitation(source_filename="paper.pdf", page_number=4),
-                SourceCitation(source_filename="paper.pdf", page_number=5),
+                SourceCitation(
+                    source_filename="paper.pdf",
+                    page_number=4,
+                    chunk_id="c1",
+                    text="Chunk 1",
+                    evidence_text="Chunk 1",
+                ),
+                SourceCitation(
+                    source_filename="paper.pdf",
+                    page_number=4,
+                    chunk_id="c2",
+                    text="Chunk 2",
+                    evidence_text="Chunk 2",
+                ),
+                SourceCitation(
+                    source_filename="paper.pdf",
+                    page_number=5,
+                    chunk_id="c3",
+                    text="Chunk 3",
+                    evidence_text="Chunk 3",
+                ),
             ],
         )
 
@@ -211,13 +242,29 @@ class TestGenerator(unittest.TestCase):
         mock_client.models.generate_content.return_value = mock_response
         mock_get_client.return_value = mock_client
 
-        chunk = _make_retrieved_chunk(source_filename="urban.pdf", page_number=1)
+        chunk = _make_retrieved_chunk(
+            chunk_id="c_urban",
+            text="Urban text",
+            source_filename="urban.pdf",
+            page_number=1,
+        )
         res = generate_answer("What happened?", [chunk])
 
         # Exact LLM text preserved in answer
         self.assertEqual(res.answer, fake_llm_text)
         # Citations are solely from chunk metadata, ignoring fake LLM citations
-        self.assertEqual(res.sources, [SourceCitation(source_filename="urban.pdf", page_number=1)])
+        self.assertEqual(
+            res.sources,
+            [
+                SourceCitation(
+                    source_filename="urban.pdf",
+                    page_number=1,
+                    chunk_id="c_urban",
+                    text="Urban text",
+                    evidence_text="Urban text",
+                )
+            ],
+        )
 
     def test_missing_api_key_has_clear_error(self):
         """get_gemini_client() raises ValueError when GEMINI_API_KEY is not set."""
@@ -318,6 +365,46 @@ class TestGenerator(unittest.TestCase):
             self.assertEqual(retry_opts.initial_delay, 1.0)
             self.assertEqual(retry_opts.max_delay, 8.0)
             self.assertEqual(retry_opts.exp_base, 2.0)
+
+    @patch("app.rag.generator.get_gemini_client")
+    def test_sources_contain_extracted_evidence_text(self, mock_get_client):
+        """generate_answer populates evidence_text on SourceCitation with concise supporting sentence."""
+        mock_client = MagicMock()
+        mock_response = MagicMock()
+        mock_response.text = "Project Atlas achieved a recall@5 of 0.82."
+        mock_client.models.generate_content.return_value = mock_response
+        mock_get_client.return_value = mock_client
+
+        atlas_chunk_text = (
+            "Project Atlas\n\n"
+            "Architecture\n"
+            "Atlas uses a hybrid retrieval pipeline combining semantic embeddings and sparse lexical matching.\n\n"
+            "Evaluation\n"
+            "In an internal experiment, Atlas achieved a retrieval recall@5 of 0.82 on the baseline question set.\n"
+            "This was a 14% improvement over the pure semantic baseline."
+        )
+
+        chunk = _make_retrieved_chunk(
+            chunk_id="atlas_c0",
+            source_filename="01_Project_Atlas.pdf",
+            page_number=1,
+            text=atlas_chunk_text,
+        )
+
+        result = generate_answer(
+            query="What was the recall@5 achieved by Project Atlas?",
+            retrieved_chunks=[chunk],
+        )
+
+        self.assertEqual(len(result.sources), 1)
+        src = result.sources[0]
+        self.assertEqual(src.source_filename, "01_Project_Atlas.pdf")
+        self.assertEqual(src.chunk_id, "atlas_c0")
+        self.assertEqual(src.page_number, 1)
+        self.assertEqual(
+            src.evidence_text,
+            "In an internal experiment, Atlas achieved a retrieval recall@5 of 0.82 on the baseline question set.",
+        )
 
 
 if __name__ == "__main__":

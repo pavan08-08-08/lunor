@@ -5,6 +5,7 @@ from google import genai
 from google.genai import errors, types
 
 from app.config import BACKEND_DIR
+from app.rag.evidence import extract_evidence_passage
 from app.rag.retriever import RetrievedChunk
 
 GEMINI_MODEL: str = "gemini-3.8-flash"
@@ -41,9 +42,12 @@ class GenerationQuotaExceededError(Exception):
 
 @dataclass
 class SourceCitation:
-    """Represents a unique source document and page citation."""
+    """Represents a unique source document and page citation with extracted evidence."""
     source_filename: str
     page_number: int
+    chunk_id: str
+    text: str
+    evidence_text: str = ""
 
 
 @dataclass
@@ -128,20 +132,6 @@ def generate_answer(
             has_sufficient_context=False,
         )
 
-    # Construct deduplicated source citations preserving first-seen order
-    sources: list[SourceCitation] = []
-    seen_sources: set[tuple[str, int]] = set()
-    for chunk in retrieved_chunks:
-        source_key = (chunk.source_filename, chunk.page_number)
-        if source_key not in seen_sources:
-            seen_sources.add(source_key)
-            sources.append(
-                SourceCitation(
-                    source_filename=chunk.source_filename,
-                    page_number=chunk.page_number,
-                )
-            )
-
     formatted_context = _format_context(retrieved_chunks)
     contents = (
         f"Document Context:\n"
@@ -177,8 +167,32 @@ def generate_answer(
     if not answer_text or not answer_text.strip():
         raise RuntimeError("Gemini model returned an empty response")
 
+    clean_answer = answer_text.strip()
+
+    # Construct deduplicated source citations preserving first-seen order,
+    # with exact concise evidence passages extracted based on query and answer.
+    sources: list[SourceCitation] = []
+    seen_chunk_ids: set[str] = set()
+    for chunk in retrieved_chunks:
+        if chunk.chunk_id not in seen_chunk_ids:
+            seen_chunk_ids.add(chunk.chunk_id)
+            ev_text = extract_evidence_passage(
+                chunk.text,
+                query=query,
+                answer=clean_answer,
+            )
+            sources.append(
+                SourceCitation(
+                    source_filename=chunk.source_filename,
+                    page_number=chunk.page_number,
+                    chunk_id=chunk.chunk_id,
+                    text=chunk.text,
+                    evidence_text=ev_text,
+                )
+            )
+
     return GeneratedAnswer(
-        answer=answer_text.strip(),
+        answer=clean_answer,
         sources=sources,
         has_sufficient_context=True,
     )
