@@ -32,6 +32,25 @@ export interface Source {
   evidence_text?: string;
 }
 
+export type ChatMessageStatus = "sending" | "sent" | "error";
+
+export interface ChatMessage {
+  id: string;
+  role: "user" | "assistant";
+  content: string;
+  sources?: Source[];
+  hasSufficientContext?: boolean;
+  status: ChatMessageStatus;
+}
+
+export interface Conversation {
+  id: string;
+  title: string;
+  messages: ChatMessage[];
+  createdAt: number;
+  updatedAt: number;
+}
+
 export interface ChatRequest {
   query: string;
 }

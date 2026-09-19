@@ -4,9 +4,10 @@ import { ChatMessage } from "../components/ChatMessage";
 import { DocumentList } from "../components/DocumentList";
 import { EmptyState } from "../components/EmptyState";
 import { PdfViewerPanel } from "../components/PdfViewerPanel";
+import { Sidebar } from "../components/Sidebar";
 import { SourceList } from "../components/SourceList";
 import { UploadButton } from "../components/UploadButton";
-import { useChat } from "../hooks/useChat";
+import { formatConversationTitle, useChat } from "../hooks/useChat";
 import {
   ApiError,
   deleteDocument,
@@ -560,5 +561,258 @@ describe("Frontend Unit Tests", () => {
       screen.getByText("This document is no longer available. It may have been deleted.")
     ).toBeInTheDocument();
     expect(screen.queryByTestId("evidence-highlight")).not.toBeInTheDocument();
+  });
+
+  // 21. formatConversationTitle creates deterministic truncated titles
+  it("formatConversationTitle creates clean, deterministic, and truncated titles", () => {
+    expect(formatConversationTitle("What is RRF?")).toBe("What is RRF?");
+    expect(
+      formatConversationTitle("   What    was the recall@5    achieved?   ")
+    ).toBe("What was the recall@5 achieved?");
+    const longQuestion =
+      "What were the exact evaluation metrics and statistical findings reported in Project Atlas?";
+    const title = formatConversationTitle(longQuestion, 40);
+    expect(title.length).toBeLessThanOrEqual(43);
+    expect(title.endsWith("...")).toBe(true);
+    expect(title.startsWith("What were the exact evaluation")).toBe(true);
+  });
+
+  // 22. Sidebar renders New Chat button and conversation list, triggers handlers
+  it("Sidebar renders New Chat button and conversation list, triggering callbacks", () => {
+    const handleNewChat = vi.fn();
+    const handleSelectConversation = vi.fn();
+    const handleUpload = vi.fn().mockResolvedValue(true);
+    const handleClose = vi.fn();
+
+    const sampleConversations = [
+      {
+        id: "c1",
+        title: "Atlas recall query",
+        messages: [],
+        createdAt: 1000,
+        updatedAt: 1000,
+      },
+      {
+        id: "c2",
+        title: "RRF architecture",
+        messages: [],
+        createdAt: 2000,
+        updatedAt: 2000,
+      },
+    ];
+
+    render(
+      <Sidebar
+        documents={[{ filename: "01_Project_Atlas.pdf" }]}
+        isLoadingDocuments={false}
+        uploadState="idle"
+        onUpload={handleUpload}
+        conversations={sampleConversations}
+        activeConversationId="c1"
+        onSelectConversation={handleSelectConversation}
+        onNewChat={handleNewChat}
+        isOpen={true}
+        onClose={handleClose}
+      />
+    );
+
+    const newChatBtn = screen.getByRole("button", { name: "New chat" });
+    expect(newChatBtn).toBeInTheDocument();
+    fireEvent.click(newChatBtn);
+    expect(handleNewChat).toHaveBeenCalledTimes(1);
+
+    expect(screen.getByText("Atlas recall query")).toBeInTheDocument();
+    const conv2Btn = screen.getByText("RRF architecture");
+    fireEvent.click(conv2Btn);
+    expect(handleSelectConversation).toHaveBeenCalledWith("c2");
+  });
+
+  // 23. useChat manages multi-session conversations, title generation, and citation preservation
+  it("useChat manages multiple conversations, title generation, switching, and preserves citations without extra API calls", async () => {
+    const mockResponses = [
+      {
+        answer: "Atlas achieved recall@5 of 0.82.",
+        sources: [
+          {
+            source_filename: "01_Project_Atlas.pdf",
+            page_number: 1,
+            chunk_id: "atlas_c0",
+            text: "Full chunk text",
+            evidence_text: "In an internal experiment, Atlas achieved recall@5 of 0.82.",
+          },
+        ],
+        has_sufficient_context: true,
+      },
+      {
+        answer: "RRF stands for Reciprocal Rank Fusion.",
+        sources: [
+          {
+            source_filename: "01_Project_Atlas.pdf",
+            page_number: 1,
+            chunk_id: "atlas_c1",
+            text: "Architecture text",
+            evidence_text: "Reciprocal Rank Fusion (RRF).",
+          },
+        ],
+        has_sufficient_context: true,
+      },
+    ];
+
+    let callCount = 0;
+    globalThis.fetch = vi.fn().mockImplementation(async () => {
+      const resp = mockResponses[callCount] || mockResponses[0];
+      callCount += 1;
+      return {
+        ok: true,
+        json: async () => resp,
+      };
+    });
+
+    function TestMultiSessionChat() {
+      const {
+        conversations,
+        activeConversationId,
+        messages,
+        send,
+        createConversation,
+        selectConversation,
+      } = useChat();
+
+      return (
+        <div>
+          <div data-testid="active-id">{activeConversationId}</div>
+          <div data-testid="conv-count">{conversations.length}</div>
+          <button data-testid="new-chat-btn" onClick={() => createConversation()}>
+            New Chat
+          </button>
+          <button
+            data-testid="send-q1"
+            onClick={() => send("What was the recall@5 achieved by Project Atlas?")}
+          >
+            Ask Q1
+          </button>
+          <button data-testid="send-q2" onClick={() => send("What does RRF stand for?")}>
+            Ask Q2
+          </button>
+          <div data-testid="conv-list">
+            {conversations.map((c) => (
+              <button
+                key={c.id}
+                data-testid={`select-${c.id}`}
+                onClick={() => selectConversation(c.id)}
+              >
+                {c.title}
+              </button>
+            ))}
+          </div>
+          <div data-testid="messages-display">
+            {messages.map((m) => (
+              <div key={m.id} data-testid={`msg-${m.role}`}>
+                <span>{m.content}</span>
+                {m.sources && (
+                  <span data-testid="msg-evidence">{m.sources[0]?.evidence_text}</span>
+                )}
+              </div>
+            ))}
+          </div>
+        </div>
+      );
+    }
+
+    render(<TestMultiSessionChat />);
+
+    // 1. Initially 1 conversation titled "New conversation"
+    expect(screen.getByTestId("conv-count")).toHaveTextContent("1");
+    expect(screen.getByTestId("conv-list")).toHaveTextContent("New conversation");
+
+    // 2. Ask first question
+    await act(async () => {
+      fireEvent.click(screen.getByTestId("send-q1"));
+    });
+
+    await waitFor(() => {
+      expect(screen.getByTestId("msg-assistant")).toHaveTextContent(
+        "Atlas achieved recall@5 of 0.82."
+      );
+      expect(screen.getByTestId("msg-evidence")).toHaveTextContent(
+        "In an internal experiment, Atlas achieved recall@5 of 0.82."
+      );
+    });
+
+    // Conversation title updated from first question
+    expect(screen.getByTestId("conv-list")).toHaveTextContent(
+      "What was the recall@5 achieved by Project Atlas?"
+    );
+    const initialCallCount = (globalThis.fetch as any).mock.calls.length;
+    expect(initialCallCount).toBe(1);
+
+    // 3. Create second conversation
+    act(() => {
+      fireEvent.click(screen.getByTestId("new-chat-btn"));
+    });
+
+    expect(screen.getByTestId("conv-count")).toHaveTextContent("2");
+    // New conversation is active and has no messages
+    expect(screen.queryByTestId("msg-assistant")).not.toBeInTheDocument();
+
+    // 4. Send question in second conversation
+    await act(async () => {
+      fireEvent.click(screen.getByTestId("send-q2"));
+    });
+
+    await waitFor(() => {
+      expect(screen.getByTestId("msg-assistant")).toHaveTextContent(
+        "RRF stands for Reciprocal Rank Fusion."
+      );
+      expect(screen.getByTestId("msg-evidence")).toHaveTextContent(
+        "Reciprocal Rank Fusion (RRF)."
+      );
+    });
+    expect((globalThis.fetch as any).mock.calls.length).toBe(2);
+
+    // 5. Switch back to first conversation
+    const firstConvBtn = screen.getByText(
+      "What was the recall@5 achieved by Project Atlas?"
+    );
+    act(() => {
+      fireEvent.click(firstConvBtn);
+    });
+
+    // Verify Conversation A's messages and citations are completely restored
+    await waitFor(() => {
+      expect(screen.getByTestId("msg-assistant")).toHaveTextContent(
+        "Atlas achieved recall@5 of 0.82."
+      );
+      expect(screen.getByTestId("msg-evidence")).toHaveTextContent(
+        "In an internal experiment, Atlas achieved recall@5 of 0.82."
+      );
+    });
+
+    // Verify switching conversations did NOT call fetch
+    expect((globalThis.fetch as any).mock.calls.length).toBe(2);
+  });
+
+  // 24. Clicking New Chat when current conversation is already empty does not duplicate
+  it("Clicking New Chat when current conversation is already empty reuses it", () => {
+    function TestEmptyChatReuse() {
+      const { conversations, createConversation } = useChat();
+      return (
+        <div>
+          <div data-testid="count">{conversations.length}</div>
+          <button data-testid="new-btn" onClick={() => createConversation()}>
+            New
+          </button>
+        </div>
+      );
+    }
+
+    render(<TestEmptyChatReuse />);
+    expect(screen.getByTestId("count")).toHaveTextContent("1");
+
+    fireEvent.click(screen.getByTestId("new-btn"));
+    expect(screen.getByTestId("count")).toHaveTextContent("1");
+
+    fireEvent.click(screen.getByTestId("new-btn"));
+    expect(screen.getByTestId("count")).toHaveTextContent("1");
   });
 });

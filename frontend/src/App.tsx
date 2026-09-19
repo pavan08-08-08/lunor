@@ -24,7 +24,25 @@ export function App() {
     deletingFilename,
   } = useDocuments();
 
-  const { messages, isSending, send } = useChat();
+  const {
+    conversations,
+    activeConversationId,
+    messages,
+    isSending,
+    send,
+    createConversation,
+    selectConversation,
+  } = useChat();
+
+  const handleSelectConversation = (id: string) => {
+    selectConversation(id);
+    setActiveSource(null);
+  };
+
+  const handleNewChat = () => {
+    createConversation();
+    setActiveSource(null);
+  };
 
   useEffect(() => {
     let isMounted = true;
@@ -55,6 +73,10 @@ export function App() {
           onUpload={upload}
           onDelete={deleteDoc}
           deletingFilename={deletingFilename}
+          conversations={conversations}
+          activeConversationId={activeConversationId}
+          onSelectConversation={handleSelectConversation}
+          onNewChat={handleNewChat}
           isOpen={isMobileSidebarOpen}
           onClose={() => setIsMobileSidebarOpen(false)}
           disabled={isBackendReachable === false}
