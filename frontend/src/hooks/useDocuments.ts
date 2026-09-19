@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
-import { getDocuments, uploadDocument } from "../services/api";
+import { deleteDocument, getDocuments, uploadDocument } from "../services/api";
 import type { Document, UploadResponse } from "../types/api";
 
 export type UploadState = "idle" | "uploading" | "error";
@@ -10,6 +10,7 @@ export function useDocuments() {
   const [uploadState, setUploadState] = useState<UploadState>("idle");
   const [uploadError, setUploadError] = useState<string | undefined>(undefined);
   const [lastUpload, setLastUpload] = useState<UploadResponse | undefined>(undefined);
+  const [deletingFilename, setDeletingFilename] = useState<string | null>(null);
 
   const refreshDocuments = useCallback(async () => {
     setIsLoadingDocuments(true);
@@ -45,6 +46,23 @@ export function useDocuments() {
     [refreshDocuments]
   );
 
+  const deleteDoc = useCallback(
+    async (filename: string): Promise<boolean> => {
+      if (deletingFilename) return false;
+      setDeletingFilename(filename);
+      try {
+        await deleteDocument(filename);
+        await refreshDocuments();
+        return true;
+      } catch {
+        return false;
+      } finally {
+        setDeletingFilename(null);
+      }
+    },
+    [deletingFilename, refreshDocuments]
+  );
+
   useEffect(() => {
     refreshDocuments();
   }, [refreshDocuments]);
@@ -55,7 +73,9 @@ export function useDocuments() {
     uploadState,
     uploadError,
     lastUpload,
+    deletingFilename,
     refreshDocuments,
     upload,
+    deleteDoc,
   };
 }

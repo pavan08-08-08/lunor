@@ -17,6 +17,8 @@ export function App() {
     uploadError,
     lastUpload,
     upload,
+    deleteDoc,
+    deletingFilename,
   } = useDocuments();
 
   const { messages, isSending, send } = useChat();
@@ -48,6 +50,8 @@ export function App() {
           uploadError={uploadError}
           lastUpload={lastUpload}
           onUpload={upload}
+          onDelete={deleteDoc}
+          deletingFilename={deletingFilename}
           isOpen={isMobileSidebarOpen}
           onClose={() => setIsMobileSidebarOpen(false)}
           disabled={isBackendReachable === false}

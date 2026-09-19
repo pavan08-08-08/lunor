@@ -8,6 +8,7 @@ import { UploadButton } from "../components/UploadButton";
 import { useChat } from "../hooks/useChat";
 import {
   ApiError,
+  deleteDocument,
   getDocuments,
   getHealth,
 } from "../services/api";
@@ -280,5 +281,65 @@ describe("Frontend Unit Tests", () => {
         "Gemini API quota exhausted. Please try again after the quota resets."
       );
     });
+  });
+
+  // 13. deleteDocument API function handles successful response and encodes URI
+  it("deleteDocument API function sends DELETE request and returns response", async () => {
+    globalThis.fetch = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        message: "Document deleted successfully",
+        filename: "my report.pdf",
+        remaining_documents: 1,
+      }),
+    });
+
+    const result = await deleteDocument("my report.pdf");
+    expect(globalThis.fetch).toHaveBeenCalledWith(
+      expect.stringContaining("/api/documents/my%20report.pdf"),
+      expect.objectContaining({ method: "DELETE" })
+    );
+    expect(result.remaining_documents).toBe(1);
+    expect(result.filename).toBe("my report.pdf");
+  });
+
+  // 14. DocumentList renders delete buttons with aria-label
+  it("DocumentList renders delete button with accessible aria-label", () => {
+    const handleDelete = vi.fn();
+    render(
+      <DocumentList
+        documents={[{ filename: "atlas.pdf" }, { filename: "borealis.pdf" }]}
+        isLoading={false}
+        onDelete={handleDelete}
+      />
+    );
+
+    const deleteAtlasBtn = screen.getByRole("button", { name: "Delete atlas.pdf" });
+    const deleteBorealisBtn = screen.getByRole("button", { name: "Delete borealis.pdf" });
+    expect(deleteAtlasBtn).toBeInTheDocument();
+    expect(deleteBorealisBtn).toBeInTheDocument();
+
+    fireEvent.click(deleteAtlasBtn);
+    expect(handleDelete).toHaveBeenCalledTimes(1);
+    expect(handleDelete).toHaveBeenCalledWith("atlas.pdf");
+  });
+
+  // 15. DocumentList disables button during deletion
+  it("DocumentList disables delete button when deletingFilename matches", () => {
+    const handleDelete = vi.fn();
+    render(
+      <DocumentList
+        documents={[{ filename: "atlas.pdf" }, { filename: "borealis.pdf" }]}
+        isLoading={false}
+        onDelete={handleDelete}
+        deletingFilename="atlas.pdf"
+      />
+    );
+
+    const deleteAtlasBtn = screen.getByRole("button", { name: "Delete atlas.pdf" });
+    const deleteBorealisBtn = screen.getByRole("button", { name: "Delete borealis.pdf" });
+
+    expect(deleteAtlasBtn).toBeDisabled();
+    expect(deleteBorealisBtn).not.toBeDisabled();
   });
 });

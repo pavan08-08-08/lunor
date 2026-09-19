@@ -279,6 +279,99 @@ class TestAPI(unittest.TestCase):
             "http://localhost:5173",
         )
 
+    def test_cors_allows_delete_method(self):
+        """CORS middleware must allow DELETE method from configured origin."""
+        response = self.client.options(
+            "/api/documents/test.pdf",
+            headers={
+                "Origin": "http://localhost:5173",
+                "Access-Control-Request-Method": "DELETE",
+            },
+        )
+        self.assertEqual(response.status_code, 200)
+        allow_methods = response.headers.get("access-control-allow-methods", "")
+        self.assertIn("DELETE", allow_methods)
+
+    @patch("app.api.documents.rebuild_vector_store")
+    def test_delete_document_success(self, mock_rebuild):
+        """Deleting an existing PDF removes it from storage, rebuilds index, and returns remaining count."""
+        (self.uploads_dir / "doc1.pdf").touch()
+        (self.uploads_dir / "doc2.pdf").touch()
+
+        with patch("app.api.documents.UPLOADS_DIR", self.uploads_dir):
+            response = self.client.delete("/api/documents/doc1.pdf")
+            self.assertEqual(response.status_code, 200)
+            data = response.json()
+            self.assertEqual(data["filename"], "doc1.pdf")
+            self.assertEqual(data["remaining_documents"], 1)
+            self.assertEqual(data["message"], "Document deleted successfully")
+            self.assertFalse((self.uploads_dir / "doc1.pdf").exists())
+            self.assertTrue((self.uploads_dir / "doc2.pdf").exists())
+            mock_rebuild.assert_called_once()
+
+    def test_delete_last_document_clears_indices(self):
+        """Deleting the last remaining document clears FAISS & BM25 index files and causes /api/chat to 400."""
+        # Put 1 document and index files in place
+        (self.uploads_dir / "only.pdf").touch()
+        (self.vectorstore_dir / "index.faiss").touch()
+        (self.vectorstore_dir / "index.pkl").touch()
+        (self.vectorstore_dir / "bm25.pkl").touch()
+
+        with patch("app.api.documents.UPLOADS_DIR", self.uploads_dir), \
+             patch("app.api.documents.VECTORSTORE_DIR", self.vectorstore_dir):
+            response = self.client.delete("/api/documents/only.pdf")
+            self.assertEqual(response.status_code, 200)
+            data = response.json()
+            self.assertEqual(data["filename"], "only.pdf")
+            self.assertEqual(data["remaining_documents"], 0)
+
+            # Assert index files were cleaned up
+            self.assertFalse((self.vectorstore_dir / "index.faiss").exists())
+            self.assertFalse((self.vectorstore_dir / "index.pkl").exists())
+            self.assertFalse((self.vectorstore_dir / "bm25.pkl").exists())
+
+        # Verify chat endpoint returns 400 when index is cleared
+        with patch("app.api.chat.VECTORSTORE_DIR", self.vectorstore_dir):
+            chat_res = self.client.post("/api/chat", json={"query": "Any query?"})
+            self.assertEqual(chat_res.status_code, 400)
+            self.assertIn("no documents are indexed", chat_res.json()["detail"].lower())
+
+    def test_delete_nonexistent_document_returns_404(self):
+        """Deleting a non-existent document returns HTTP 404."""
+        with patch("app.api.documents.UPLOADS_DIR", self.uploads_dir):
+            response = self.client.delete("/api/documents/nonexistent.pdf")
+            self.assertEqual(response.status_code, 404)
+            self.assertIn("not found", response.json()["detail"].lower())
+
+    def test_delete_rejects_non_pdf(self):
+        """Deleting a non-PDF filename returns HTTP 400."""
+        with patch("app.api.documents.UPLOADS_DIR", self.uploads_dir):
+            response = self.client.delete("/api/documents/malicious.sh")
+            self.assertEqual(response.status_code, 400)
+            self.assertIn("only pdf", response.json()["detail"].lower())
+
+    def test_delete_rejects_path_traversal(self):
+        """Path traversal attempts in delete endpoint return HTTP 400."""
+        from fastapi import HTTPException
+        from app.api.documents import delete_document
+
+        with patch("app.api.documents.UPLOADS_DIR", self.uploads_dir):
+            # Backslash traversal attempt in URL
+            res1 = self.client.delete("/api/documents/..%5Cpasswords.pdf")
+            self.assertEqual(res1.status_code, 400)
+            self.assertIn("invalid", res1.json()["detail"].lower())
+
+            # Dot-dot traversal attempt in URL
+            res2 = self.client.delete("/api/documents/%2e%2e")
+            self.assertEqual(res2.status_code, 400)
+            self.assertIn("invalid", res2.json()["detail"].lower())
+
+            # Direct function call with path traversal
+            with self.assertRaises(HTTPException) as ctx:
+                delete_document("../../etc/passwords.pdf")
+            self.assertEqual(ctx.exception.status_code, 400)
+            self.assertIn("invalid", ctx.exception.detail.lower())
+
 
 if __name__ == "__main__":
     unittest.main()

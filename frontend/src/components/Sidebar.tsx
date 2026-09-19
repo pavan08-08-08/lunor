@@ -10,6 +10,8 @@ interface SidebarProps {
   uploadError?: string;
   lastUpload?: UploadResponse;
   onUpload: (file: File) => Promise<boolean>;
+  onDelete?: (filename: string) => Promise<boolean>;
+  deletingFilename?: string | null;
   isOpen: boolean;
   onClose: () => void;
   disabled?: boolean;
@@ -22,6 +24,8 @@ export const Sidebar: React.FC<SidebarProps> = ({
   uploadError,
   lastUpload,
   onUpload,
+  onDelete,
+  deletingFilename,
   isOpen,
   onClose,
   disabled = false,
@@ -96,6 +100,9 @@ export const Sidebar: React.FC<SidebarProps> = ({
           <DocumentList
             documents={documents}
             isLoading={isLoadingDocuments}
+            onDelete={onDelete}
+            deletingFilename={deletingFilename}
+            disabled={disabled}
           />
         </div>
       </aside>

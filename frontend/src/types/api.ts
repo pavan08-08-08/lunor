@@ -28,6 +28,12 @@ export interface UploadResponse {
   chunks: number;
 }
 
+export interface DeleteResponse {
+  message: string;
+  filename: string;
+  remaining_documents: number;
+}
+
 export interface HealthResponse {
   status: string;
 }

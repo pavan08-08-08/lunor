@@ -30,11 +30,29 @@ class DocumentUploadResponse(BaseModel):
     chunks: int
 
 
+class DocumentDeleteResponse(BaseModel):
+    message: str
+    filename: str
+    remaining_documents: int
+
+
+def _cleanup_vector_store_files() -> None:
+    """Delete FAISS and BM25 index files from VECTORSTORE_DIR when no indexed chunks remain."""
+    for filename in ["index.faiss", "index.pkl", "bm25.pkl"]:
+        index_path = VECTORSTORE_DIR / filename
+        if index_path.exists():
+            try:
+                index_path.unlink()
+            except OSError as exc:
+                logger.warning("Failed to delete stale index file %s: %s", index_path, exc)
+
+
 def rebuild_vector_store() -> None:
     """Find all PDFs in data/uploads, chunk and embed them, and rebuild the FAISS store."""
     ensure_directories()
     pdf_files = sorted(UPLOADS_DIR.glob("*.pdf"))
     if not pdf_files:
+        _cleanup_vector_store_files()
         return
 
     all_chunks: list[ChunkDocument] = []
@@ -44,6 +62,7 @@ def rebuild_vector_store() -> None:
         all_chunks.extend(chunks)
 
     if not all_chunks:
+        _cleanup_vector_store_files()
         return
 
     embedded_chunks = embed_chunks(all_chunks)
@@ -118,4 +137,50 @@ def list_documents() -> DocumentListResponse:
     pdf_files = sorted(UPLOADS_DIR.glob("*.pdf"), key=lambda p: p.name)
     return DocumentListResponse(
         documents=[DocumentItem(filename=pdf.name) for pdf in pdf_files]
+    )
+
+
+@router.delete("/{filename}", response_model=DocumentDeleteResponse)
+def delete_document(filename: str) -> DocumentDeleteResponse:
+    """Delete an uploaded PDF document, clean up storage, and rebuild search indices."""
+    if not filename or not filename.strip():
+        raise HTTPException(status_code=400, detail="Filename cannot be empty")
+
+    raw_name = filename.strip()
+    safe_filename = Path(raw_name).name
+
+    # Reject directory traversal attempts or invalid filenames
+    if safe_filename != raw_name or "/" in raw_name or "\\" in raw_name or safe_filename in (".", ".."):
+        raise HTTPException(status_code=400, detail="Invalid filename")
+
+    if not safe_filename.lower().endswith(".pdf"):
+        raise HTTPException(status_code=400, detail="Only PDF files can be deleted")
+
+    ensure_directories()
+    target_path = (UPLOADS_DIR / safe_filename).resolve()
+
+    # Verify target path remains within UPLOADS_DIR
+    if target_path.parent != UPLOADS_DIR.resolve():
+        raise HTTPException(status_code=400, detail="Invalid file path")
+
+    if not target_path.exists():
+        raise HTTPException(status_code=404, detail="Document not found")
+
+    try:
+        target_path.unlink()
+    except Exception as exc:
+        logger.error("Failed to delete file %s from disk: %s", safe_filename, exc)
+        raise HTTPException(status_code=500, detail="Failed to delete document from storage")
+
+    try:
+        rebuild_vector_store()
+    except Exception as exc:
+        logger.error("Failed to rebuild search indices after deleting %s: %s", safe_filename, exc, exc_info=True)
+        raise HTTPException(status_code=500, detail="Failed to rebuild search indices after deletion")
+
+    remaining_files = sorted(UPLOADS_DIR.glob("*.pdf")) if UPLOADS_DIR.exists() else []
+    return DocumentDeleteResponse(
+        message="Document deleted successfully",
+        filename=safe_filename,
+        remaining_documents=len(remaining_files),
     )

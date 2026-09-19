@@ -1,6 +1,7 @@
 import type {
   ChatRequest,
   ChatResponse,
+  DeleteResponse,
   DocumentsResponse,
   HealthResponse,
   UploadResponse,
@@ -74,6 +75,14 @@ export async function uploadDocument(file: File): Promise<UploadResponse> {
     body: formData,
   });
   return handleResponse<UploadResponse>(res);
+}
+
+export async function deleteDocument(filename: string): Promise<DeleteResponse> {
+  const res = await fetch(`${API_BASE_URL}/api/documents/${encodeURIComponent(filename)}`, {
+    method: "DELETE",
+    headers: { Accept: "application/json" },
+  });
+  return handleResponse<DeleteResponse>(res);
 }
 
 export async function sendChatMessage(query: string): Promise<ChatResponse> {
