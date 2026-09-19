@@ -4,6 +4,7 @@ import type {
   DeleteResponse,
   DocumentsResponse,
   HealthResponse,
+  PageRenderResponse,
   UploadResponse,
 } from "../types/api";
 
@@ -19,8 +20,51 @@ export class ApiError extends Error {
   }
 }
 
-const rawBaseUrl = (import.meta.env.VITE_API_BASE_URL as string | undefined) || "http://localhost:8000";
-const API_BASE_URL = rawBaseUrl.replace(/\/+$/, "");
+export const rawBaseUrl = (import.meta.env.VITE_API_BASE_URL as string | undefined) || "http://localhost:8000";
+export const API_BASE_URL = rawBaseUrl.replace(/\/+$/, "");
+
+export function getDocumentPdfUrl(filename: string, chunkId?: string, pageNumber?: number): string {
+  const encodedName = encodeURIComponent(filename);
+  let url = `${API_BASE_URL}/api/documents/${encodedName}/file`;
+  const params = new URLSearchParams();
+  if (chunkId) {
+    params.set("chunk_id", chunkId);
+  }
+  const queryString = params.toString();
+  if (queryString) {
+    url += `?${queryString}`;
+  }
+  if (pageNumber) {
+    url += `#page=${pageNumber}`;
+  }
+  return url;
+}
+
+export async function getDocumentPage(
+  filename: string,
+  pageNumber: number = 1,
+  chunkId?: string,
+  query?: string,
+  evidenceText?: string,
+): Promise<PageRenderResponse> {
+  const encodedName = encodeURIComponent(filename);
+  const params = new URLSearchParams();
+  params.set("page_number", String(pageNumber));
+  if (chunkId) {
+    params.set("chunk_id", chunkId);
+  }
+  if (query) {
+    params.set("query", query);
+  }
+  if (evidenceText) {
+    params.set("evidence_text", evidenceText);
+  }
+  const res = await fetch(`${API_BASE_URL}/api/documents/${encodedName}/page?${params.toString()}`, {
+    method: "GET",
+    headers: { Accept: "application/json" },
+  });
+  return handleResponse<PageRenderResponse>(res);
+}
 
 async function handleResponse<T>(response: Response): Promise<T> {
   if (!response.ok) {

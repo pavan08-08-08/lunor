@@ -1,12 +1,14 @@
 import React from "react";
 import type { ChatMessage as ChatMessageType } from "../hooks/useChat";
+import type { Source } from "../types/api";
 import { SourceList } from "./SourceList";
 
 interface ChatMessageProps {
   message: ChatMessageType;
+  onSelectSource?: (source: Source) => void;
 }
 
-export const ChatMessage: React.FC<ChatMessageProps> = ({ message }) => {
+export const ChatMessage: React.FC<ChatMessageProps> = ({ message, onSelectSource }) => {
   const isUser = message.role === "user";
 
   if (isUser) {
@@ -57,7 +59,7 @@ export const ChatMessage: React.FC<ChatMessageProps> = ({ message }) => {
 
         {/* Source Citations - only rendered when context is sufficient */}
         {message.status === "sent" && message.hasSufficientContext === true && message.sources && (
-          <SourceList sources={message.sources} />
+          <SourceList sources={message.sources} onSelectSource={onSelectSource} />
         )}
       </div>
     </div>

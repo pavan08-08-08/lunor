@@ -1,14 +1,17 @@
 import { useEffect, useState } from "react";
 import { ConnectionBanner } from "./components/ConnectionBanner";
 import { ChatWindow } from "./components/ChatWindow";
+import { PdfViewerPanel } from "./components/PdfViewerPanel";
 import { Sidebar } from "./components/Sidebar";
 import { useChat } from "./hooks/useChat";
 import { useDocuments } from "./hooks/useDocuments";
 import { getHealth } from "./services/api";
+import type { Source } from "./types/api";
 
 export function App() {
   const [isBackendReachable, setIsBackendReachable] = useState<boolean | null>(null);
   const [isMobileSidebarOpen, setIsMobileSidebarOpen] = useState<boolean>(false);
+  const [activeSource, setActiveSource] = useState<Source | null>(null);
 
   const {
     documents,
@@ -64,7 +67,18 @@ export function App() {
           hasDocuments={documents.length > 0}
           isBackendReachable={isBackendReachable}
           onOpenMobileSidebar={() => setIsMobileSidebarOpen(true)}
+          onSelectSource={setActiveSource}
         />
+
+        {activeSource && (
+          <PdfViewerPanel
+            source={activeSource}
+            onClose={() => setActiveSource(null)}
+            isDocumentAvailable={documents.some(
+              (d) => d.filename === activeSource.source_filename
+            )}
+          />
+        )}
       </div>
     </div>
   );

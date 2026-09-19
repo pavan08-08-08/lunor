@@ -1,5 +1,6 @@
 import React, { useEffect, useRef } from "react";
 import type { ChatMessage as ChatMessageType } from "../hooks/useChat";
+import type { Source } from "../types/api";
 import { ChatInput } from "./ChatInput";
 import { ChatMessage } from "./ChatMessage";
 import { EmptyState } from "./EmptyState";
@@ -11,6 +12,7 @@ interface ChatWindowProps {
   hasDocuments: boolean;
   isBackendReachable: boolean | null;
   onOpenMobileSidebar: () => void;
+  onSelectSource?: (source: Source) => void;
 }
 
 export const ChatWindow: React.FC<ChatWindowProps> = ({
@@ -20,6 +22,7 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
   hasDocuments,
   isBackendReachable,
   onOpenMobileSidebar,
+  onSelectSource,
 }) => {
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
@@ -107,7 +110,11 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
         ) : (
           <div className="max-w-3xl w-full mx-auto flex-1">
             {messages.map((msg) => (
-              <ChatMessage key={msg.id} message={msg} />
+              <ChatMessage
+                key={msg.id}
+                message={msg}
+                onSelectSource={onSelectSource}
+              />
             ))}
             <div ref={messagesEndRef} />
           </div>

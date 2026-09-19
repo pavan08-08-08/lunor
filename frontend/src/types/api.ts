@@ -6,9 +6,30 @@ export interface DocumentsResponse {
   documents: Document[];
 }
 
+export interface HighlightRect {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
+
+export interface PageRenderResponse {
+  filename: string;
+  page_number: number;
+  total_pages: number;
+  page_width: number;
+  page_height: number;
+  svg: string;
+  evidence_text: string;
+  highlights: HighlightRect[];
+}
+
 export interface Source {
   source_filename: string;
   page_number: number;
+  chunk_id: string;
+  text: string;
+  evidence_text?: string;
 }
 
 export interface ChatRequest {

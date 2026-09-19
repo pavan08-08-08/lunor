@@ -3,6 +3,7 @@ import { render, screen, fireEvent, waitFor, act } from "@testing-library/react"
 import { ChatMessage } from "../components/ChatMessage";
 import { DocumentList } from "../components/DocumentList";
 import { EmptyState } from "../components/EmptyState";
+import { PdfViewerPanel } from "../components/PdfViewerPanel";
 import { SourceList } from "../components/SourceList";
 import { UploadButton } from "../components/UploadButton";
 import { useChat } from "../hooks/useChat";
@@ -107,7 +108,14 @@ describe("Frontend Unit Tests", () => {
       ok: true,
       json: async () => ({
         answer: "This is the generated answer.",
-        sources: [{ source_filename: "doc.pdf", page_number: 2 }],
+        sources: [
+          {
+            source_filename: "doc.pdf",
+            page_number: 2,
+            chunk_id: "doc_p2_c0",
+            text: "Sample evidence text",
+          },
+        ],
         has_sufficient_context: true,
       }),
     });
@@ -178,8 +186,18 @@ describe("Frontend Unit Tests", () => {
   // 8. SourceList rendering
   it("SourceList renders source filename and page numbers", () => {
     const sources = [
-      { source_filename: "traffic_study.pdf", page_number: 1 },
-      { source_filename: "traffic_study.pdf", page_number: 4 },
+      {
+        source_filename: "traffic_study.pdf",
+        page_number: 1,
+        chunk_id: "ts_p1_c0",
+        text: "Traffic density rises at peak hours.",
+      },
+      {
+        source_filename: "traffic_study.pdf",
+        page_number: 4,
+        chunk_id: "ts_p4_c1",
+        text: "Signal timing reduces intersection delays.",
+      },
     ];
 
     render(<SourceList sources={sources} />);
@@ -209,7 +227,14 @@ describe("Frontend Unit Tests", () => {
       id: "msg-1",
       role: "assistant" as const,
       content: "The framework proposes XGBoost and Random Forest.",
-      sources: [{ source_filename: "traffic_study.pdf", page_number: 2 }],
+      sources: [
+        {
+          source_filename: "traffic_study.pdf",
+          page_number: 2,
+          chunk_id: "ts_p2_c0",
+          text: "XGBoost models show superior prediction accuracy.",
+        },
+      ],
       hasSufficientContext: true,
       status: "sent" as const,
     };
@@ -228,7 +253,14 @@ describe("Frontend Unit Tests", () => {
       id: "msg-2",
       role: "assistant" as const,
       content: "Based on the provided context, there is no information about who the CEO of Project Atlas is.",
-      sources: [{ source_filename: "candidate_chunk.pdf", page_number: 5 }],
+      sources: [
+        {
+          source_filename: "candidate_chunk.pdf",
+          page_number: 5,
+          chunk_id: "cand_p5_c0",
+          text: "Generic candidate chunk text.",
+        },
+      ],
       hasSufficientContext: false,
       status: "sent" as const,
     };
@@ -341,5 +373,192 @@ describe("Frontend Unit Tests", () => {
 
     expect(deleteAtlasBtn).toBeDisabled();
     expect(deleteBorealisBtn).not.toBeDisabled();
+  });
+
+  // 16. Source citation renders as accessible button and triggers onSelectSource
+  it("Source citation renders as accessible button and triggers onSelectSource", () => {
+    const handleSelectSource = vi.fn();
+    const source = {
+      source_filename: "01_Project_Atlas.pdf",
+      page_number: 1,
+      chunk_id: "atlas_p1_c0",
+      text: "Project Atlas achieved recall@5 = 0.82.",
+    };
+
+    render(<SourceList sources={[source]} onSelectSource={handleSelectSource} />);
+
+    const citationBtn = screen.getByRole("button", {
+      name: "View evidence in 01_Project_Atlas.pdf, page 1",
+    });
+    expect(citationBtn).toBeInTheDocument();
+
+    fireEvent.click(citationBtn);
+    expect(handleSelectSource).toHaveBeenCalledTimes(1);
+    expect(handleSelectSource).toHaveBeenCalledWith(source);
+  });
+
+  // 17. PdfViewerPanel renders filename, page indicator, and exact evidence text
+  it("PdfViewerPanel renders filename, page indicator, and exact evidence text", async () => {
+    const handleClose = vi.fn();
+    const source = {
+      source_filename: "01_Project_Atlas.pdf",
+      page_number: 1,
+      chunk_id: "atlas_p1_c0",
+      text: "internal experiment recall@5 = 0.82",
+      evidence_text: "Atlas achieved a retrieval recall@5 of 0.82.",
+    };
+
+    globalThis.fetch = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        filename: "01_Project_Atlas.pdf",
+        page_number: 1,
+        total_pages: 5,
+        page_width: 595,
+        page_height: 841,
+        svg: "<svg><text>Atlas Page Content</text></svg>",
+        evidence_text: "Atlas achieved a retrieval recall@5 of 0.82.",
+        highlights: [{ x: 100, y: 200, width: 150, height: 20 }],
+      }),
+    });
+
+    render(
+      <PdfViewerPanel
+        source={source}
+        onClose={handleClose}
+        isDocumentAvailable={true}
+      />
+    );
+
+    expect(screen.getByText("01_Project_Atlas.pdf")).toBeInTheDocument();
+    expect(screen.getByText("Page 1")).toBeInTheDocument();
+    expect(screen.getByText("Atlas achieved a retrieval recall@5 of 0.82.")).toBeInTheDocument();
+
+    await waitFor(() => {
+      expect(screen.getByText("Page 1 of 5")).toBeInTheDocument();
+      expect(screen.getByTestId("evidence-highlight")).toBeInTheDocument();
+    });
+  });
+
+  // 18. PdfViewerPanel navigation and zoom controls function properly
+  it("PdfViewerPanel navigation and zoom controls function properly", async () => {
+    const handleClose = vi.fn();
+    const source = {
+      source_filename: "report.pdf",
+      page_number: 1,
+      chunk_id: "rep_p1",
+      text: "Evidence text.",
+    };
+
+    globalThis.fetch = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        filename: "report.pdf",
+        page_number: 1,
+        total_pages: 3,
+        page_width: 600,
+        page_height: 800,
+        svg: "<svg><text>Report Page 1</text></svg>",
+        evidence_text: "Evidence text.",
+        highlights: [],
+      }),
+    });
+
+    render(
+      <PdfViewerPanel
+        source={source}
+        onClose={handleClose}
+        isDocumentAvailable={true}
+      />
+    );
+
+    await waitFor(() => {
+      expect(screen.getByText("Page 1 of 3")).toBeInTheDocument();
+    });
+
+    // Zoom controls
+    const zoomInBtn = screen.getByRole("button", { name: "Zoom in" });
+    const zoomOutBtn = screen.getByRole("button", { name: "Zoom out" });
+    const fitPageBtn = screen.getByRole("button", { name: "Fit to page" });
+    const fitWidthBtn = screen.getByRole("button", { name: "Fit to width" });
+
+    expect(screen.getByText("100%")).toBeInTheDocument();
+
+    fireEvent.click(zoomInBtn);
+    expect(screen.getByText("115%")).toBeInTheDocument();
+
+    fireEvent.click(zoomOutBtn);
+    expect(screen.getByText("100%")).toBeInTheDocument();
+
+    fireEvent.click(fitPageBtn);
+    expect(screen.getByText("85%")).toBeInTheDocument();
+
+    fireEvent.click(fitWidthBtn);
+    expect(screen.getByText("100%")).toBeInTheDocument();
+
+    // Page navigation
+    const nextBtn = screen.getByRole("button", { name: "Next page" });
+    fireEvent.click(nextBtn);
+
+    await waitFor(() => {
+      expect(globalThis.fetch).toHaveBeenCalledWith(
+        expect.stringContaining("page_number=2"),
+        expect.anything()
+      );
+    });
+  });
+
+  // 19. PdfViewerPanel close button and Escape key close panel
+  it("PdfViewerPanel close button and Escape key trigger onClose", () => {
+    const handleClose = vi.fn();
+    const source = {
+      source_filename: "atlas.pdf",
+      page_number: 1,
+      chunk_id: "c1",
+      text: "text",
+    };
+
+    globalThis.fetch = vi.fn().mockReturnValue(new Promise(() => {}));
+
+    render(
+      <PdfViewerPanel
+        source={source}
+        onClose={handleClose}
+        isDocumentAvailable={true}
+      />
+    );
+
+    const closeBtn = screen.getByRole("button", { name: "Close PDF viewer" });
+    fireEvent.click(closeBtn);
+    expect(handleClose).toHaveBeenCalledTimes(1);
+
+    // Test Escape key
+    fireEvent.keyDown(window, { key: "Escape" });
+    expect(handleClose).toHaveBeenCalledTimes(2);
+  });
+
+  // 20. PdfViewerPanel renders unavailable state when document is deleted
+  it("PdfViewerPanel renders unavailable message when document is not available", () => {
+    const handleClose = vi.fn();
+    const source = {
+      source_filename: "deleted.pdf",
+      page_number: 1,
+      chunk_id: "del_p1_c0",
+      text: "Old evidence from deleted document.",
+    };
+
+    render(
+      <PdfViewerPanel
+        source={source}
+        onClose={handleClose}
+        isDocumentAvailable={false}
+      />
+    );
+
+    expect(screen.getByText("Document Unavailable")).toBeInTheDocument();
+    expect(
+      screen.getByText("This document is no longer available. It may have been deleted.")
+    ).toBeInTheDocument();
+    expect(screen.queryByTestId("evidence-highlight")).not.toBeInTheDocument();
   });
 });
