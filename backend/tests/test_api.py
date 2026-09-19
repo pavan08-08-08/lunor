@@ -13,7 +13,12 @@ from fastapi.testclient import TestClient
 
 from app.api.chat import ChatResponse
 from app.main import app
-from app.rag.generator import GeneratedAnswer, GenerationUnavailableError, SourceCitation
+from app.rag.generator import (
+    GeneratedAnswer,
+    GenerationQuotaExceededError,
+    GenerationUnavailableError,
+    SourceCitation,
+)
 from app.rag.loader import PageDocument
 
 
@@ -99,6 +104,34 @@ class TestAPI(unittest.TestCase):
             self.assertEqual(
                 data["detail"],
                 "The AI model is temporarily unavailable. Please try again shortly.",
+            )
+
+    @patch("app.api.chat.generate_answer")
+    @patch("app.api.chat.retrieve")
+    @patch("app.api.chat.load_bm25_index")
+    @patch("app.api.chat.load_vector_store")
+    def test_chat_returns_429_on_generation_quota_exceeded_error(
+        self, mock_load, mock_bm25, mock_retrieve, mock_generate
+    ):
+        """When Gemini generation raises GenerationQuotaExceededError, API returns HTTP 429 with detail."""
+        (self.vectorstore_dir / "index.faiss").touch()
+        (self.vectorstore_dir / "index.pkl").touch()
+        (self.vectorstore_dir / "bm25.pkl").touch()
+
+        mock_load.return_value = MagicMock()
+        mock_bm25.return_value = MagicMock()
+        mock_retrieve.return_value = [MagicMock()]
+        mock_generate.side_effect = GenerationQuotaExceededError(
+            "Gemini API quota exhausted. Please try again after the quota resets."
+        )
+
+        with patch("app.api.chat.VECTORSTORE_DIR", self.vectorstore_dir):
+            response = self.client.post("/api/chat", json={"query": "Explain the framework"})
+            self.assertEqual(response.status_code, 429)
+            data = response.json()
+            self.assertEqual(
+                data["detail"],
+                "Gemini API quota exhausted. Please try again after the quota resets.",
             )
 
     def test_chat_rejects_empty_query(self):

@@ -1,5 +1,5 @@
 import { useCallback, useState } from "react";
-import { sendChatMessage } from "../services/api";
+import { ApiError, sendChatMessage } from "../services/api";
 import type { Source } from "../types/api";
 
 export type ChatMessageStatus = "sending" | "sent" | "error";
@@ -67,8 +67,16 @@ export function useChat() {
           )
         );
       } catch (err: unknown) {
-        const errorMessage =
+        let errorMessage =
           err instanceof Error ? err.message : "Failed to get response from assistant";
+
+        if (
+          (err instanceof ApiError && err.status === 429) ||
+          ((err as { status?: number })?.status === 429)
+        ) {
+          errorMessage = "Gemini API quota exhausted. Please try again after the quota resets.";
+        }
+
         setMessages((prev) =>
           prev.map((msg) =>
             msg.id === assistantMsgId

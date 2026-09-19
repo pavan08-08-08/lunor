@@ -4,7 +4,11 @@ from pydantic import BaseModel, field_validator
 
 from app.config import VECTORSTORE_DIR
 from app.rag.bm25_store import load_bm25_index
-from app.rag.generator import GenerationUnavailableError, generate_answer
+from app.rag.generator import (
+    GenerationQuotaExceededError,
+    GenerationUnavailableError,
+    generate_answer,
+)
 from app.rag.retriever import retrieve
 from app.rag.vector_store import load_vector_store
 
@@ -67,6 +71,9 @@ def chat(request: ChatRequest) -> ChatResponse:
 
     try:
         generated = generate_answer(query=query, retrieved_chunks=retrieved_chunks)
+    except GenerationQuotaExceededError as exc:
+        logger.warning("Generation quota exceeded: %s", exc)
+        raise HTTPException(status_code=429, detail=str(exc))
     except GenerationUnavailableError as exc:
         logger.warning("Generation unavailable: %s", exc)
         raise HTTPException(status_code=503, detail=str(exc))

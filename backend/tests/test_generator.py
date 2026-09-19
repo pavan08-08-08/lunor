@@ -13,6 +13,7 @@ from app.rag.generator import (
     FALLBACK_ANSWER,
     GEMINI_MODEL,
     GeneratedAnswer,
+    GenerationQuotaExceededError,
     GenerationUnavailableError,
     SourceCitation,
     _format_context,
@@ -245,6 +246,12 @@ class TestGenerator(unittest.TestCase):
         err = GenerationUnavailableError("Service temporary unavailable")
         self.assertEqual(str(err), "Service temporary unavailable")
 
+    def test_generation_quota_exceeded_error_exists(self):
+        """GenerationQuotaExceededError must exist and be an Exception subclass."""
+        self.assertTrue(issubclass(GenerationQuotaExceededError, Exception))
+        err = GenerationQuotaExceededError("Quota exceeded")
+        self.assertEqual(str(err), "Quota exceeded")
+
     @patch("app.rag.generator.get_gemini_client")
     def test_server_error_translated_to_generation_unavailable_error(self, mock_get_client):
         """Terminal Gemini ServerError (e.g. 503) must be translated to GenerationUnavailableError."""
@@ -264,8 +271,26 @@ class TestGenerator(unittest.TestCase):
         )
 
     @patch("app.rag.generator.get_gemini_client")
-    def test_client_error_not_converted_to_generation_unavailable_error(self, mock_get_client):
-        """ClientError (e.g. 400 bad request) must propagate and not be converted to GenerationUnavailableError."""
+    def test_client_error_429_translated_to_generation_quota_exceeded_error(self, mock_get_client):
+        """Gemini ClientError with status 429 must be translated to GenerationQuotaExceededError."""
+        mock_client = MagicMock()
+        mock_client.models.generate_content.side_effect = errors.ClientError(
+            429, {"error": {"message": "Resource exhausted", "status": "RESOURCE_EXHAUSTED"}}
+        )
+        mock_get_client.return_value = mock_client
+
+        chunk = _make_retrieved_chunk(text="Document text")
+        with self.assertRaises(GenerationQuotaExceededError) as ctx:
+            generate_answer("What is the framework?", [chunk])
+
+        self.assertEqual(
+            str(ctx.exception),
+            "Gemini API quota exhausted. Please try again after the quota resets.",
+        )
+
+    @patch("app.rag.generator.get_gemini_client")
+    def test_client_error_not_converted_to_generation_unavailable_or_quota_error(self, mock_get_client):
+        """ClientError (e.g. 400 bad request) must propagate and not be converted to quota or unavailable error."""
         mock_client = MagicMock()
         mock_client.models.generate_content.side_effect = errors.ClientError(
             400, {"error": {"message": "Invalid argument"}}

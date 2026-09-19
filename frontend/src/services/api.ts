@@ -36,6 +36,11 @@ async function handleResponse<T>(response: Response): Promise<T> {
       // Non-JSON response body or empty
     }
 
+    if (response.status === 429) {
+      const message = errorDetail || "Gemini API quota exhausted. Please try again after the quota resets.";
+      throw new ApiError(429, message, errorDetail);
+    }
+
     const message = errorDetail || `Request failed with status ${response.status}`;
     throw new ApiError(response.status, message, errorDetail);
   }

@@ -243,4 +243,42 @@ describe("Frontend Unit Tests", () => {
     expect(screen.queryByText("Page 5")).not.toBeInTheDocument();
     expect(screen.getByText("Limited context")).toBeInTheDocument();
   });
+
+  // 12. Chat error handling for 429 quota exhaustion
+  it("useChat sets assistant message to quota error on HTTP 429", async () => {
+    globalThis.fetch = vi.fn().mockResolvedValue({
+      ok: false,
+      status: 429,
+      json: async () => ({
+        detail: "Gemini API quota exhausted. Please try again after the quota resets.",
+      }),
+    });
+
+    function TestChatQuotaComponent() {
+      const { messages, send } = useChat();
+      return (
+        <div>
+          <button onClick={() => send("What is the speed?")}>Ask</button>
+          {messages.map((m) => (
+            <div key={m.id} data-testid={`msg-${m.role}-${m.status}`}>
+              {m.content}
+            </div>
+          ))}
+        </div>
+      );
+    }
+
+    render(<TestChatQuotaComponent />);
+    const askButton = screen.getByText("Ask");
+
+    await act(async () => {
+      fireEvent.click(askButton);
+    });
+
+    await waitFor(() => {
+      expect(screen.getByTestId("msg-assistant-error")).toHaveTextContent(
+        "Gemini API quota exhausted. Please try again after the quota resets."
+      );
+    });
+  });
 });

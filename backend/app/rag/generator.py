@@ -35,6 +35,10 @@ class GenerationUnavailableError(Exception):
     """Raised when Gemini generation fails after exhausting retries."""
 
 
+class GenerationQuotaExceededError(Exception):
+    """Raised when Gemini API quota is exhausted (HTTP 429)."""
+
+
 @dataclass
 class SourceCitation:
     """Represents a unique source document and page citation."""
@@ -162,6 +166,12 @@ def generate_answer(
         raise GenerationUnavailableError(
             "The AI model is temporarily unavailable. Please try again shortly."
         ) from exc
+    except errors.ClientError as exc:
+        if getattr(exc, "code", None) in (429, "429"):
+            raise GenerationQuotaExceededError(
+                "Gemini API quota exhausted. Please try again after the quota resets."
+            ) from exc
+        raise
 
     answer_text = response.text
     if not answer_text or not answer_text.strip():
