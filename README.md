@@ -8,6 +8,22 @@ Lunor is a full-stack, document-grounded Retrieval-Augmented Generation (RAG) kn
 
 [▶️ Watch the Lunor Demo Video](https://drive.google.com/file/d/139zOeqAkglHyywkYYQyU883QbgVsp1b6/view?usp=sharing)
 
+## 🤖 AI-Assisted Development
+
+Lunor was developed using AI-assisted engineering workflows. AI tools were used for architecture discussions, implementation, technical review, debugging, testing, documentation, and development planning.
+
+| AI Tool | Primary Use |
+
+|---|---|
+
+| **Claude** | Architecture and technical design discussions, RAG and retrieval strategy analysis, independent technical review of major implementation decisions, and debugging/review of core logic. |
+
+| **Antigravity IDE** | Primary AI-assisted coding environment used to implement backend and frontend features, write and update tests, perform codebase audits, run verification commands, and integrate project components. |
+
+| **ChatGPT** | Project planning, implementation guidance, debugging assistance, technical explanations, testing and demo planning, documentation guidance, and development workflow support. |
+
+AI tools were used as development assistants throughout the project. The final implementation was validated through automated tests, manual verification, and codebase audits.
+
 ## Features
 
 - **PDF Upload**: Upload PDF files with validation of file extensions and `%PDF-` magic header signatures.
