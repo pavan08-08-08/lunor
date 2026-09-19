@@ -4,6 +4,10 @@ Lunor is a full-stack, document-grounded Retrieval-Augmented Generation (RAG) kn
 
 ---
 
+## Demo Video
+
+[▶️ Watch the Lunor Demo Video](https://drive.google.com/file/d/139zOeqAkglHyywkYYQyU883QbgVsp1b6/view?usp=sharing)
+
 ## Features
 
 - **PDF Upload**: Upload PDF files with validation of file extensions and `%PDF-` magic header signatures.
