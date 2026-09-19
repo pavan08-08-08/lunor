@@ -55,8 +55,8 @@ export const ChatMessage: React.FC<ChatMessageProps> = ({ message }) => {
           </div>
         )}
 
-        {/* Source Citations */}
-        {message.status === "sent" && message.sources && (
+        {/* Source Citations - only rendered when context is sufficient */}
+        {message.status === "sent" && message.hasSufficientContext === true && message.sources && (
           <SourceList sources={message.sources} />
         )}
       </div>

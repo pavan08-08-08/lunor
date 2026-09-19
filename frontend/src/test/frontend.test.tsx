@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { render, screen, fireEvent, waitFor, act } from "@testing-library/react";
+import { ChatMessage } from "../components/ChatMessage";
 import { DocumentList } from "../components/DocumentList";
 import { EmptyState } from "../components/EmptyState";
 import { SourceList } from "../components/SourceList";
@@ -199,5 +200,47 @@ describe("Frontend Unit Tests", () => {
     );
 
     expect(screen.getByText("Only PDF files are allowed")).toBeInTheDocument();
+  });
+
+  // 10. ChatMessage sources displayed when hasSufficientContext=true
+  it("ChatMessage renders sources when hasSufficientContext is true", () => {
+    const message = {
+      id: "msg-1",
+      role: "assistant" as const,
+      content: "The framework proposes XGBoost and Random Forest.",
+      sources: [{ source_filename: "traffic_study.pdf", page_number: 2 }],
+      hasSufficientContext: true,
+      status: "sent" as const,
+    };
+
+    render(<ChatMessage message={message} />);
+    expect(screen.getByText("The framework proposes XGBoost and Random Forest.")).toBeInTheDocument();
+    expect(screen.getByText("Sources")).toBeInTheDocument();
+    expect(screen.getByText("traffic_study.pdf")).toBeInTheDocument();
+    expect(screen.getByText("Page 2")).toBeInTheDocument();
+    expect(screen.queryByText("Limited context")).not.toBeInTheDocument();
+  });
+
+  // 11. ChatMessage sources NOT displayed when hasSufficientContext=false
+  it("ChatMessage does NOT render sources when hasSufficientContext is false", () => {
+    const message = {
+      id: "msg-2",
+      role: "assistant" as const,
+      content: "Based on the provided context, there is no information about who the CEO of Project Atlas is.",
+      sources: [{ source_filename: "candidate_chunk.pdf", page_number: 5 }],
+      hasSufficientContext: false,
+      status: "sent" as const,
+    };
+
+    render(<ChatMessage message={message} />);
+    expect(
+      screen.getByText(
+        "Based on the provided context, there is no information about who the CEO of Project Atlas is."
+      )
+    ).toBeInTheDocument();
+    expect(screen.queryByText("Sources")).not.toBeInTheDocument();
+    expect(screen.queryByText("candidate_chunk.pdf")).not.toBeInTheDocument();
+    expect(screen.queryByText("Page 5")).not.toBeInTheDocument();
+    expect(screen.getByText("Limited context")).toBeInTheDocument();
   });
 });
