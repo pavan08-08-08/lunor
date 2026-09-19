@@ -1,0 +1,22 @@
+# Python
+__pycache__/
+*.py[cod]
+
+# Virtual environment
+.venv/
+
+# Environment variables
+.env
+
+# Vector database
+vectorstore/
+
+# Uploaded documents
+data/
+
+# Node
+node_modules/
+dist/
+
+# macOS
+.DS_Store
